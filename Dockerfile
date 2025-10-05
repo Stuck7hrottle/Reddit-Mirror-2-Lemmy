@@ -4,5 +4,5 @@ WORKDIR /app
 COPY auto_mirror.py /app
 
 RUN pip install --no-cache-dir praw requests
-
-CMD ["python", "auto_mirror.py"]
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "-u", "auto_mirror.py"]
