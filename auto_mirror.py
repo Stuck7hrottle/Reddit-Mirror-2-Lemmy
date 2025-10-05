@@ -172,3 +172,13 @@ while True:
                         persist_state()
                         sync_comments(submission, lemmy_post_id)
                 else:
+                    sync_comments(submission, post_map[submission.id])
+        print(f"🕒 Sleeping {SLEEP_SECONDS}s...")
+        persist_state()
+        time.sleep(SLEEP_SECONDS)
+
+    except Exception as e:
+        print(f"❌ Error: {e}")
+        print("🔁 Reauthenticating Lemmy...")
+        jwt = lemmy_login()
+        time.sleep(30)
