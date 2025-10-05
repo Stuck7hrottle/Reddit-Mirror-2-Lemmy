@@ -12,7 +12,7 @@ REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
 REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
 REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
 REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "reddit2lemmy-auto/0.4")
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "reddit2lemmy-auto/0.6")
 
 LEMMY_URL = os.getenv("LEMMY_URL", "https://lemmy.world")
 LEMMY_USERNAME = os.getenv("LEMMY_USERNAME")
@@ -20,7 +20,7 @@ LEMMY_PASSWORD = os.getenv("LEMMY_PASSWORD")
 
 SUBREDDITS = [s.strip() for s in os.getenv("SUBREDDITS", "technology").split(",")]
 LEMMY_COMMUNITY = os.getenv("LEMMY_COMMUNITY", "technology")
-SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "600"))  # check interval (seconds)
+SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "600"))  # default 10min
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
 DATA_DIR.mkdir(exist_ok=True)
@@ -73,7 +73,7 @@ def lemmy_login():
             data = json.load(open(TOKEN_FILE))
             # Lemmy tokens valid ~24h
             if "jwt" in data and time.time() - data.get("timestamp", 0) < 23 * 3600:
-                print("🔁 Using cached Lemmy token")
+                print("🔁 Using cached Lemmy token", flush=True)
                 return data["jwt"]
         except Exception:
             pass  # fallback to new login
@@ -86,23 +86,23 @@ def lemmy_login():
         if r.ok:
             token = r.json()["jwt"]
             json.dump({"jwt": token, "timestamp": time.time()}, open(TOKEN_FILE, "w"))
-            print("✅ Logged into Lemmy (new token cached)")
+            print("✅ Logged into Lemmy (new token cached)", flush=True)
             return token
         elif "rate_limit_error" in r.text:
-            print("⚠️ Lemmy rate limit hit, waiting 60s...")
+            print("⚠️ Lemmy rate limit hit, waiting 60s...", flush=True)
             time.sleep(60)
         else:
-            print(f"❌ Lemmy login failed: {r.text}")
+            print(f"❌ Lemmy login failed: {r.text}", flush=True)
             time.sleep(30)
 
-# Get token
 jwt = lemmy_login()
 
 # ===========================
 # LEMMY POSTING
 # ===========================
-def post_to_lemmy(submission):
-    """Post a Reddit submission to Lemmy."""
+def post_to_lemmy(submission, retry=False):
+    """Post a Reddit submission to Lemmy, retry if login expired."""
+    global jwt
     body = submission.selftext.strip() if submission.selftext else submission.url
     payload = {
         "name": submission.title[:200],
@@ -113,14 +113,19 @@ def post_to_lemmy(submission):
     r = requests.post(f"{LEMMY_URL}/api/v3/post", json=payload)
     if r.ok:
         post_id = r.json()["post_view"]["post"]["id"]
-        print(f"✅ Posted submission: {submission.title}")
+        print(f"✅ Posted submission: {submission.title}", flush=True)
         return post_id
+    elif "incorrect_login" in r.text and not retry:
+        print("⚠️ Lemmy token expired, refreshing...", flush=True)
+        jwt = lemmy_login()
+        return post_to_lemmy(submission, retry=True)
     else:
-        print(f"⚠️ Failed to post submission: {r.text}")
+        print(f"⚠️ Failed to post submission: {r.text}", flush=True)
         return None
 
-def post_comment_to_lemmy(post_id, comment_body, parent_id=None):
+def post_comment_to_lemmy(post_id, comment_body, parent_id=None, retry=False):
     """Post a comment to Lemmy (threaded if parent_id)."""
+    global jwt
     payload = {
         "content": comment_body[:5000],
         "post_id": post_id,
@@ -131,28 +136,44 @@ def post_comment_to_lemmy(post_id, comment_body, parent_id=None):
     r = requests.post(f"{LEMMY_URL}/api/v3/comment", json=payload)
     if r.ok:
         return r.json()["comment_view"]["comment"]["id"]
+    elif "incorrect_login" in r.text and not retry:
+        print("⚠️ Lemmy token expired (comment), refreshing...", flush=True)
+        jwt = lemmy_login()
+        return post_comment_to_lemmy(post_id, comment_body, parent_id, retry=True)
+    elif "rate_limit_error" in r.text:
+        print("⚠️ Lemmy comment rate limit, waiting 10s...", flush=True)
+        time.sleep(10)
+        return None
     else:
-        if "rate_limit_error" in r.text:
-            print("⚠️ Lemmy comment rate limit, waiting 10s...")
-            time.sleep(10)
-        else:
-            print(f"⚠️ Failed to post comment: {r.text}")
+        print(f"⚠️ Failed to post comment: {r.text}", flush=True)
         return None
 
+# ===========================
+# COMMENT SYNC (THREADED)
+# ===========================
 def sync_comments(submission, lemmy_post_id):
-    """Mirror Reddit comments to Lemmy."""
+    """Mirror Reddit comments to Lemmy with threading."""
     submission.comments.replace_more(limit=0)
-    for c in submission.comments.list():
-        if c.id in comment_cache:
+    comment_map_local = {}
+
+    for comment in submission.comments.list():
+        if comment.id in comment_cache:
             continue
-        if not c.body or c.body.strip() == "[deleted]":
+        if not comment.body or comment.body.strip() == "[deleted]":
             continue
-        author = f"u/{c.author}" if c.author else "[deleted]"
-        body = f"{author} said:\n\n{c.body}"
-        lemmy_comment_id = post_comment_to_lemmy(lemmy_post_id, body)
+
+        parent_lemmy_id = None
+        if comment.parent_id.startswith("t1_"):
+            parent_reddit_id = comment.parent_id.split("_", 1)[1]
+            parent_lemmy_id = comment_cache.get(parent_reddit_id) or comment_map_local.get(parent_reddit_id)
+
+        author = f"u/{comment.author}" if comment.author else "[deleted]"
+        body = f"{author} said:\n\n{comment.body}"
+        lemmy_comment_id = post_comment_to_lemmy(lemmy_post_id, body, parent_lemmy_id)
         if lemmy_comment_id:
-            comment_cache[c.id] = lemmy_comment_id
-            print(f"💬 Mirrored comment from {author}")
+            comment_cache[comment.id] = lemmy_comment_id
+            comment_map_local[comment.id] = lemmy_comment_id
+            print(f"💬 Mirrored comment from {author}", flush=True)
             persist_state()
         time.sleep(1)
 
@@ -163,7 +184,7 @@ while True:
     try:
         for sub in SUBREDDITS:
             subreddit = reddit.subreddit(sub)
-            print(f"🔍 Checking new posts in r/{sub} ...")
+            print(f"🔍 Checking new posts in r/{sub} ...", flush=True)
             for submission in subreddit.new(limit=5):
                 if submission.id not in post_map:
                     lemmy_post_id = post_to_lemmy(submission)
@@ -173,12 +194,12 @@ while True:
                         sync_comments(submission, lemmy_post_id)
                 else:
                     sync_comments(submission, post_map[submission.id])
-        print(f"🕒 Sleeping {SLEEP_SECONDS}s...")
+        print(f"🕒 Sleeping {SLEEP_SECONDS}s...", flush=True)
         persist_state()
         time.sleep(SLEEP_SECONDS)
 
     except Exception as e:
-        print(f"❌ Error: {e}")
-        print("🔁 Reauthenticating Lemmy...")
+        print(f"❌ Error: {e}", flush=True)
+        print("🔁 Reauthenticating Lemmy...", flush=True)
         jwt = lemmy_login()
         time.sleep(30)
