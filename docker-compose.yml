@@ -4,23 +4,6 @@ services:
     build: .
     container_name: reddit-lemmy-bridge
     restart: always
-    environment:
-      # Reddit API
-      REDDIT_CLIENT_ID: your_reddit_client_id
-      REDDIT_CLIENT_SECRET: your_reddit_client_secret
-      REDDIT_USERNAME: your_reddit_username
-      REDDIT_PASSWORD: your_reddit_password
-      REDDIT_USER_AGENT: "reddit2lemmy-auto/0.3"
-
-      # Lemmy
-      LEMMY_URL: https://lemmy.world
-      LEMMY_USERNAME: your_lemmy_username
-      LEMMY_PASSWORD: your_lemmy_password
-      LEMMY_COMMUNITY: technology
-
-      # Mirror settings
-      SUBREDDITS: technology,science
-      SLEEP_SECONDS: 600
-      DATA_DIR: /data
+    env_file: .env
     volumes:
       - ./data:/data
