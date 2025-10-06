@@ -1,247 +1,132 @@
+#!/usr/bin/env python3
 import os
 import time
 import json
-import praw
 import requests
-from pathlib import Path
+from datetime import datetime
 
-# ===========================
-# CONFIGURATION
-# ===========================
-REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
-REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
-REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
-REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "reddit2lemmy-auto/1.1")
+# ==============================
+# 🔧 Configuration
+# ==============================
+MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "5"))
+POST_RETRY_DELAY = int(os.getenv("POST_RETRY_DELAY", "30"))
+TOKEN_CACHE = "data/token.json"
+COOLDOWN_FILE = "data/last_login.txt"
+COOLDOWN_SECONDS = 600         # 10 min cooldown
+TOKEN_REUSE_HOURS = 6          # reuse token 6 h
+SLEEP_SECONDS = 900            # sleep 15 min between cycles
 
-LEMMY_URL = os.getenv("LEMMY_URL", "https://lemmy.world").rstrip("/")
-LEMMY_USERNAME = os.getenv("LEMMY_USERNAME")
-LEMMY_PASSWORD = os.getenv("LEMMY_PASSWORD")
+# ==============================
+# 🔑 Lemmy Login
+# ==============================
+def lemmy_login():
+    """Log in to Lemmy, caching JWT and respecting cooldown."""
+    os.makedirs("data", exist_ok=True)
 
-SUBREDDITS = [s.strip() for s in os.getenv("SUBREDDITS", "technology").split(",")]
-LEMMY_COMMUNITY = os.getenv("LEMMY_COMMUNITY", "technology")
-SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "900"))
-RATE_LIMIT_SLEEP = int(os.getenv("RATE_LIMIT_SLEEP", "60"))
+    # Reuse token if young enough
+    if os.path.exists(TOKEN_CACHE):
+        age = time.time() - os.path.getmtime(TOKEN_CACHE)
+        if age < TOKEN_REUSE_HOURS * 3600:
+            try:
+                with open(TOKEN_CACHE) as f:
+                    data = json.load(f)
+                if "jwt" in data:
+                    print(f"🔁 Using recent Lemmy token (age={int(age)} s)")
+                    return data["jwt"]
+            except Exception:
+                pass
 
-DATA_DIR = Path(os.getenv("DATA_DIR", "./data"))
-DATA_DIR.mkdir(exist_ok=True)
-POSTS_FILE = DATA_DIR / "posts.json"
-COMMENTS_FILE = DATA_DIR / "comments.json"
-TOKEN_FILE = DATA_DIR / "token.json"
+    # Enforce login cooldown
+    if os.path.exists(COOLDOWN_FILE):
+        since = time.time() - os.path.getmtime(COOLDOWN_FILE)
+        if since < COOLDOWN_SECONDS:
+            wait_left = int(COOLDOWN_SECONDS - since)
+            print(f"🕒 Cooldown active, waiting {wait_left}s before next login…")
+            time.sleep(wait_left)
 
-# ===========================
-# REDDIT AUTHENTICATION
-# ===========================
-reddit = praw.Reddit(
-    client_id=REDDIT_CLIENT_ID,
-    client_secret=REDDIT_CLIENT_SECRET,
-    username=REDDIT_USERNAME,
-    password=REDDIT_PASSWORD,
-    user_agent=REDDIT_USER_AGENT,
-)
-
-# ===========================
-# UTILITIES
-# ===========================
-def load_json(path):
-    if path.exists():
-        try:
-            with open(path, "r") as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            print(f"⚠️ Corrupted JSON at {path}, resetting...", flush=True)
-            return {}
-    return {}
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-
-post_map = load_json(POSTS_FILE)
-comment_cache = load_json(COMMENTS_FILE)
-
-def persist_state():
-    save_json(POSTS_FILE, post_map)
-    save_json(COMMENTS_FILE, comment_cache)
-
-# ===========================
-# LEMMY LOGIN (SELF-HEALING)
-# ===========================
-def lemmy_login(force=False):
-    if not force and TOKEN_FILE.exists():
-        try:
-            data = json.load(open(TOKEN_FILE))
-            age = time.time() - data.get("timestamp", 0)
-            if "jwt" in data and age < 600:  # Reuse token younger than 10 minutes
-                print(f"🔁 Using recent Lemmy token (age={int(age)}s)", flush=True)
-                return data["jwt"]
-            if "jwt" in data and age < 23 * 3600:
-                print("🔁 Using cached Lemmy token", flush=True)
-                return data["jwt"]
-        except Exception:
-            print("⚠️ Invalid token cache, deleting...", flush=True)
-            TOKEN_FILE.unlink(missing_ok=True)
-
-    backoff = 30
-    while True:
-        try:
-            login_url = f"{LEMMY_URL}/api/v3/user/login"
-            print(f"🔑 Logging in to {login_url} as {LEMMY_USERNAME}", flush=True)
-            r = requests.post(login_url, json={
-                "username_or_email": LEMMY_USERNAME,
-                "password": LEMMY_PASSWORD
-            }, headers={"Connection": "close"}, timeout=30)
-        except requests.RequestException as e:
-            print(f"⚠️ Network error during login: {e}", flush=True)
-            time.sleep(backoff)
-            continue
-
-        if r.ok:
-            token = r.json().get("jwt")
-            if token:
-                json.dump({"jwt": token, "timestamp": time.time()}, open(TOKEN_FILE, "w"))
-                print("✅ Logged into Lemmy (new token cached)", flush=True)
-                return token
-
-        txt = r.text.lower()
-        if "duplicate key value" in txt:
-            print(f"⚠️ Lemmy duplicate-token bug hit. Clearing cache & waiting {backoff}s...", flush=True)
-            TOKEN_FILE.unlink(missing_ok=True)
-            time.sleep(backoff)
-            backoff = min(backoff * 2, 300)
-            continue
-
-        if "rate_limit_error" in txt:
-            print(f"⚠️ Lemmy rate limit on login, waiting {backoff}s...", flush=True)
-            time.sleep(backoff)
-            continue
-
-        print(f"❌ Lemmy login failed: {r.text}", flush=True)
-        TOKEN_FILE.unlink(missing_ok=True)
-        time.sleep(backoff)
-        backoff = min(backoff * 2, 300)
-
-jwt = lemmy_login()
-
-# ===========================
-# HELPER FUNCTIONS
-# ===========================
-def exponential_backoff(base, attempt):
-    return min(base * (2 ** attempt), base * 10)
-
-def safe_post(url, payload, retries=3):
-    global jwt
-    for attempt in range(retries):
-        payload["auth"] = jwt
-        print(f"➡️ POST {url} (attempt {attempt+1}/{retries})", flush=True)
-        try:
-            r = requests.post(url, json=payload, timeout=30)
-        except requests.RequestException as e:
-            print(f"⚠️ Network error during API call: {e}", flush=True)
-            time.sleep(5)
-            continue
-
-        print(f"⬅️ Response {r.status_code}: {r.text[:300]}", flush=True)
-
-        if r.ok:
-            return r
-
-        text = r.text.lower()
-        if "incorrect_login" in text or "invalid_token" in text:
-            print("⚠️ Token invalid, refreshing...", flush=True)
-            jwt = lemmy_login(force=True)
-            continue
-        if "rate_limit_error" in text:
-            wait = exponential_backoff(RATE_LIMIT_SLEEP, attempt)
-            print(f"⚠️ Rate limit hit, waiting {wait}s...", flush=True)
-            time.sleep(wait)
-            continue
-        if "duplicate key value" in text:
-            print("⚠️ Duplicate-token error mid-post, retrying login...", flush=True)
-            jwt = lemmy_login(force=True)
-            continue
-
-        time.sleep(5)
-    print(f"❌ All retries failed for {url}", flush=True)
-    return None
-
-# ===========================
-# POST & COMMENT FUNCTIONS
-# ===========================
-def post_to_lemmy(submission):
-    body = submission.selftext.strip() if submission.selftext else submission.url
-    payload = {
-        "name": submission.title[:200],
-        "body": body,
-        "community_name": LEMMY_COMMUNITY,
-        "auth": jwt,
+    # Perform login
+    creds = {
+        "username_or_email": os.getenv("LEMMY_USER"),
+        "password": os.getenv("LEMMY_PASSWORD"),
     }
-    r = safe_post(f"{LEMMY_URL}/api/v3/post", payload)
-    if r and r.ok:
-        post_id = r.json()["post_view"]["post"]["id"]
-        print(f"✅ Posted submission: {submission.title}", flush=True)
-        return post_id
-    print(f"⚠️ Failed to post submission: {r.text if r else 'unknown error'}", flush=True)
-    return None
+    url = os.getenv("LEMMY_URL").rstrip("/") + "/api/v3/user/login"
+    print(f"🔑 Logging in to {url} as {creds['username_or_email']}")
+    r = requests.post(url, json=creds)
+    if r.status_code != 200:
+        print(f"❌ Login failed ({r.status_code}): {r.text}")
+        raise SystemExit(1)
 
-def post_comment_to_lemmy(post_id, body, parent_id=None):
-    payload = {"content": body[:5000], "post_id": post_id, "auth": jwt}
-    if parent_id:
-        payload["parent_id"] = parent_id
-    r = safe_post(f"{LEMMY_URL}/api/v3/comment", payload)
-    if r and r.ok:
-        return r.json()["comment_view"]["comment"]["id"]
-    return None
+    data = r.json()
+    if "jwt" not in data:
+        print(f"⚠️ Unexpected login response: {data}")
+        raise SystemExit(1)
 
-def sync_comments(submission, lemmy_post_id):
-    submission.comments.replace_more(limit=0)
-    comment_map_local = {}
+    with open(TOKEN_CACHE, "w") as f:
+        json.dump(data, f)
+    open(COOLDOWN_FILE, "w").close()
+    print("✅ Logged into Lemmy (new token cached)")
+    return data["jwt"]
 
-    for c in submission.comments.list():
-        if c.id in comment_cache:
-            continue
-        if not c.body or c.body.strip() == "[deleted]":
-            continue
+# ==============================
+# 📤 Post to Lemmy
+# ==============================
+def post_to_lemmy(post):
+    """Send one Reddit post dict to Lemmy."""
+    jwt = lemmy_login()
+    payload = {
+        "name": post["title"],
+        "url": post["url"],
+        "community_id": post["community_id"],
+        "body": post.get("selftext", "")
+    }
+    headers = {"Authorization": f"Bearer {jwt}"}
+    url = os.getenv("LEMMY_URL").rstrip("/") + "/api/v3/post"
 
-        parent_lemmy_id = None
-        if c.parent_id.startswith("t1_"):
-            parent_reddit_id = c.parent_id.split("_", 1)[1]
-            parent_lemmy_id = comment_cache.get(parent_reddit_id) or comment_map_local.get(parent_reddit_id)
-
-        author = f"u/{c.author}" if c.author else "[deleted]"
-        body = f"{author} said:\n\n{c.body}"
-        lemmy_comment_id = post_comment_to_lemmy(lemmy_post_id, body, parent_lemmy_id)
-        if lemmy_comment_id:
-            comment_cache[c.id] = lemmy_comment_id
-            comment_map_local[c.id] = lemmy_comment_id
-            print(f"💬 Mirrored comment from {author}", flush=True)
-            persist_state()
-        time.sleep(1)
-
-# ===========================
-# MAIN LOOP
-# ===========================
-while True:
     try:
-        for sub in SUBREDDITS:
-            print(f"🔍 Checking new posts in r/{sub} ...", flush=True)
-            for submission in reddit.subreddit(sub).new(limit=5):
-                if submission.id not in post_map:
-                    lemmy_post_id = post_to_lemmy(submission)
-                    if lemmy_post_id:
-                        post_map[submission.id] = lemmy_post_id
-                        persist_state()
-                        sync_comments(submission, lemmy_post_id)
-                else:
-                    sync_comments(submission, post_map[submission.id])
+        r = requests.post(url, json=payload, headers=headers, timeout=15)
+        if r.status_code == 200:
+            print(f"✅ Posted submission: {post['title']}")
+            return True
+        else:
+            print(f"⚠️ Post failed ({r.status_code}): {r.text}")
+            return False
+    except requests.RequestException as e:
+        print(f"⚠️ Network error during post: {e}")
+        return False
 
-        persist_state()
-        print(f"🕒 Sleeping {SLEEP_SECONDS}s...", flush=True)
+# ==============================
+# 🔁 Main Loop (mock example)
+# ==============================
+def fetch_new_reddit_posts():
+    """Placeholder for your Reddit fetching logic."""
+    # Replace with your actual Reddit mirror fetcher
+    return [
+        {"title": f"Example Post {i+1}",
+         "url": f"https://reddit.com/example{i+1}",
+         "community_id": int(os.getenv("LEMMY_COMMUNITY_ID", "2")),
+         "selftext": ""}
+        for i in range(3)
+    ]
+
+def main():
+    while True:
+        print(f"\n🔍 Checking new posts in {os.getenv('REDDIT_SOURCE', 'r/example')} at {datetime.utcnow()} UTC…")
+        new_posts = fetch_new_reddit_posts()
+        count = 0
+
+        for post in new_posts:
+            if count >= MAX_POSTS_PER_RUN:
+                print(f"🛑 Reached MAX_POSTS_PER_RUN={MAX_POSTS_PER_RUN}, stopping early this cycle.")
+                break
+            success = post_to_lemmy(post)
+            if success:
+                count += 1
+            else:
+                print(f"⚠️ Waiting {POST_RETRY_DELAY}s before next attempt…")
+                time.sleep(POST_RETRY_DELAY)
+
+        print(f"🕒 Sleeping {SLEEP_SECONDS}s before next cycle…")
         time.sleep(SLEEP_SECONDS)
 
-    except Exception as e:
-        print(f"❌ Error: {e}", flush=True)
-        print("🔁 Forcing re-login...", flush=True)
-        TOKEN_FILE.unlink(missing_ok=True)
-        jwt = lemmy_login(force=True)
-        time.sleep(30)
+if __name__ == "__main__":
+    main()
