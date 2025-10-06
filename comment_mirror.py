@@ -1,107 +1,115 @@
-#!/usr/bin/env python3
-"""
-comment_mirror.py
------------------
-Mirrors comments from Reddit threads into their corresponding Lemmy posts.
-
-Reads mapping data saved by auto_mirror.py (reddit_post_id → lemmy_post_id)
-and recreates the comment trees on Lemmy.
-
-Environment variables are loaded from .env:
-    MIRROR_COMMENTS=true
-    COMMENT_LIMIT=3
-    COMMENT_LIMIT_TOTAL=500
-    COMMENT_SLEEP=0.3
-    DATA_DIR=/data
-"""
-
 import os
-import json
-import time
 import praw
 import requests
+import json
+import time
+import argparse
 from dotenv import load_dotenv
 
+# Load .env variables
 load_dotenv()
 
-# Reddit setup
+# Reddit credentials
 reddit = praw.Reddit(
     client_id=os.getenv("REDDIT_CLIENT_ID"),
     client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
     username=os.getenv("REDDIT_USERNAME"),
     password=os.getenv("REDDIT_PASSWORD"),
-    user_agent=os.getenv("REDDIT_USER_AGENT", "reddit-lemmy-bridge/1.0"),
+    user_agent=os.getenv("REDDIT_USER_AGENT"),
 )
 
-# Lemmy setup
-LEMMY_URL = os.getenv("LEMMY_URL")
+# Lemmy credentials
+LEMMY_URL = os.getenv("LEMMY_URL").rstrip("/")
 LEMMY_USER = os.getenv("LEMMY_USER")
 LEMMY_PASS = os.getenv("LEMMY_PASS")
 
-DATA_DIR = os.getenv("DATA_DIR", "/data")
-MIRROR_COMMENTS = os.getenv("MIRROR_COMMENTS", "true").lower() == "true"
-COMMENT_LIMIT = int(os.getenv("COMMENT_LIMIT", 3))
-COMMENT_LIMIT_TOTAL = int(os.getenv("COMMENT_LIMIT_TOTAL", 500))
+# Comment options
 COMMENT_SLEEP = float(os.getenv("COMMENT_SLEEP", 0.3))
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+POST_MAP_PATH = os.path.join(DATA_DIR, "post_map.json")
 
-# ---------------- Lemmy auth -----------------
-TOKEN_CACHE = os.path.join(DATA_DIR, "lemmy_token.json")
+# Parse CLI arguments
+parser = argparse.ArgumentParser()
+parser.add_argument("--refresh", action="store_true", help="Re-sync all existing posts and fill missing comments")
+args = parser.parse_args()
 
-
+# Simple Lemmy login
 def lemmy_login():
-    """Authenticate with Lemmy and cache JWT."""
-    if os.path.exists(TOKEN_CACHE):
-        try:
-            with open(TOKEN_CACHE, "r") as f:
-                data = json.load(f)
-            if time.time() - data["time"] < 3600:  # valid for an hour
-                return data["jwt"]
-        except Exception:
-            pass
-
-    print(f"🔑 Logging in to {LEMMY_URL} as {LEMMY_USER}")
-    resp = requests.post(f"{LEMMY_URL}/api/v3/user/login", json={
+    r = requests.post(f"{LEMMY_URL}/api/v3/user/login", json={
         "username_or_email": LEMMY_USER,
         "password": LEMMY_PASS
     })
-    if resp.status_code != 200:
-        raise RuntimeError(f"Failed to login to Lemmy: {resp.text}")
-    jwt = resp.json()["jwt"]
-    with open(TOKEN_CACHE, "w") as f:
-        json.dump({"jwt": jwt, "time": time.time()}, f)
+    r.raise_for_status()
+    jwt = r.json().get("jwt")
+    if not jwt:
+        raise RuntimeError(f"Failed to login to Lemmy: {r.text}")
     return jwt
 
+jwt = lemmy_login()
+headers = {"Authorization": f"Bearer {jwt}"}
 
-# ---------------- Helpers -----------------
-def post_comment(lemmy_post_id, parent_id, content, jwt):
-    """Post a comment to Lemmy."""
-    payload = {
-        "post_id": lemmy_post_id,
-        "content": content,
-    }
+# Load post mapping
+if not os.path.exists(POST_MAP_PATH):
+    print(f"⚠️ No mapping file found at {POST_MAP_PATH}. Run auto_mirror.py first.")
+    exit()
+
+with open(POST_MAP_PATH, "r") as f:
+    post_map = json.load(f)
+
+print(f"🔁 Loaded {len(post_map)} Reddit→Lemmy mappings")
+
+# Lemmy helper: get all comment contents under a post
+def get_existing_lemmy_comments(lemmy_post_id):
+    try:
+        r = requests.get(f"{LEMMY_URL}/api/v3/comment/list", params={
+            "post_id": lemmy_post_id,
+            "limit": 1000,
+            "sort": "New"
+        }, headers=headers)
+        if r.status_code != 200:
+            return set()
+        comments = r.json().get("comments", [])
+        return set(c["comment"]["content"].strip() for c in comments)
+    except Exception as e:
+        print(f"⚠️ Failed to fetch Lemmy comments for {lemmy_post_id}: {e}")
+        return set()
+
+# Lemmy helper: post a comment
+def post_lemmy_comment(lemmy_post_id, content, parent_id=None):
+    data = {"post_id": lemmy_post_id, "content": content}
     if parent_id:
-        payload["parent_id"] = parent_id
-
-    headers = {"Authorization": f"Bearer {jwt}"}
-    resp = requests.post(f"{LEMMY_URL}/api/v3/comment", json=payload, headers=headers)
-    if resp.status_code == 200:
-        return resp.json()["comment_view"]["comment"]["id"]
+        data["parent_id"] = parent_id
+    r = requests.post(f"{LEMMY_URL}/api/v3/comment", json=data, headers=headers)
+    if r.status_code != 200:
+        print(f"⚠️ Lemmy error posting comment: {r.status_code} {r.text}")
     else:
-        print(f"⚠️ Failed to post comment: {resp.status_code} {resp.text}")
-        return None
+        print(f"💬 Comment posted successfully → Lemmy ID {r.json()['comment_view']['comment']['id']}")
+    time.sleep(COMMENT_SLEEP)
 
+# Recursive function to mirror Reddit comment trees
+def mirror_comments_tree(comments, existing_comments, lemmy_post_id, depth=0):
+    for comment in comments:
+        if isinstance(comment, praw.models.MoreComments):
+            continue
+        body = comment.body.strip()
+        if body in existing_comments:
+            print(f"{'  ' * depth}↩️ Skipping already mirrored comment by u/{comment.author}")
+            continue
+        post_lemmy_comment(lemmy_post_id, f"**u/{comment.author}:** {body}")
+        existing_comments.add(body)
+        if len(comment.replies) > 0:
+            mirror_comments_tree(comment.replies, existing_comments, lemmy_post_id, depth + 1)
 
-def mirror_comments_for_post(reddit_post_id, lemmy_post_id, jwt):
-    """Recursively mirror all comments from a single Reddit submission."""
-    submission = reddit.submission(id=reddit_post_id)
-    submission.comments.replace_more(limit=None)
-    count = 0
+# Main loop
+for reddit_id, lemmy_post_id in post_map.items():
+    try:
+        submission = reddit.submission(id=reddit_id.split("_")[-1])
+        submission.comments.replace_more(limit=None)
+        print(f"🧩 Syncing comments for Reddit post {submission.id} → Lemmy post {lemmy_post_id}")
+        existing_comments = get_existing_lemmy_comments(lemmy_post_id)
+        print(f"   {len(existing_comments)} existing Lemmy comments detected.")
+        mirror_comments_tree(submission.comments, existing_comments, lemmy_post_id)
+    except Exception as e:
+        print(f"⚠️ Error syncing {reddit_id}: {e}")
 
-    def process_comment(c, parent_lemmy_id=None):
-        nonlocal count
-        if count >= COMMENT_LIMIT_TOTAL:
-            return
-
-        author = c.author.name if c.author else "[deleted]"
-        text = f"**{author}** said:\n\n{c.body}"
-        lemmy_comment_id = po
+print("✅ Comment sync complete.")
