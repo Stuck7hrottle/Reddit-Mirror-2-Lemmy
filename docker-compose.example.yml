@@ -1,0 +1,54 @@
+# Reddit → Lemmy Bridge
+# Example docker-compose.yml (generic version for any Lemmy-Ansible setup)
+
+services:
+  reddit-lemmy-bridge:
+    container_name: reddit-lemmy-bridge
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+    volumes:
+      - ./auto_mirror.py:/app/auto_mirror.py:ro
+      - ./data:/app/data
+    command: ["python", "-u", "auto_mirror.py"]
+    networks:
+      - lemmy_net
+    hostname: reddit-lemmy-bridge
+
+  reddit-comment-mirror:
+    container_name: reddit-comment-mirror
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+    volumes:
+      - ./comment_mirror.py:/app/comment_mirror.py:ro
+      - ./data:/app/data
+    command: ["python", "-u", "comment_mirror.py"]
+    networks:
+      - lemmy_net
+    hostname: reddit-comment-mirror
+
+  reddit-edit-sync:
+    container_name: reddit-edit-sync
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+    volumes:
+      - ./edit_sync.py:/app/edit_sync.py:ro
+      - ./data:/app/data
+    command: ["python", "-u", "edit_sync.py"]
+    networks:
+      - lemmy_net
+    hostname: reddit-edit-sync
+
+networks:
+  lemmy_net:
+    external: true
+    # Replace this with your Lemmy-Ansible network name
+    name: <your_lemmy_network_name>_default
