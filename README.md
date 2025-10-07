@@ -1,106 +1,145 @@
-# 🪶 Reddit → Lemmy Bridge (Universal Deployment Guide)
+# Reddit → Lemmy Bridge
 
-A complete Docker-based system that automatically mirrors **Reddit posts, media, and comments** to **Lemmy communities**, and keeps them up to date.
+A Dockerized bridge that mirrors **Reddit posts and comments** into **Lemmy communities** and keeps them synchronized.
 
-Designed for **Lemmy-Ansible 0.19.x+** and **Docker Compose v2+** environments.
+- Multi‑subreddit → multi‑community mapping
+- Full comment mirroring (nested threads)
+- Edit synchronization
+- Safe, configurable, and production‑friendly
 
----
-
-## ✨ Features
-
-- 🔁 **Multi-subreddit → multi-community mapping** (`SUB_MAP` in `.env`)
-- 🖼️ **Pictrs upload support** for Reddit media
-- 💬 **Full comment mirroring** (threaded structure preserved)
-- ✏️ **Edit synchronization** keeps Lemmy posts & comments updated
-- 🧠 **Token & post mapping cache** for continuity across runs
-- 🐳 **Docker-native** and compatible with Lemmy-Ansible deployments
+> Works with Lemmy-Ansible 0.19.x+ and Docker Compose v2+.
 
 ---
 
-## 🧱 Project Structure
+## 🚀 Quick Start (Docker)
+
+```bash
+# 1) Clone your repo
+git clone https://github.com/<you>/Reddit-Mirror-2-Lemmy.git
+cd Reddit-Mirror-2-Lemmy
+
+# 2) Prepare configuration
+cp .env.example .env
+# edit .env with your Reddit & Lemmy credentials
+
+# 3) Choose a docker-compose file
+cp docker-compose.example.yml docker-compose.yml
+# edit the external network name to match your Lemmy-Ansible network
+
+# 4) Build & start the bridge
+docker compose build --no-cache
+docker compose up -d
+
+# 5) Watch logs
+docker logs -f reddit-lemmy-bridge
+```
+
+> The bridge will begin mirroring new Reddit submissions based on your `SUB_MAP` configuration. Use the comment mirror and edit sync on demand (see below).
+
+---
+
+## ⚙️ Environment Configuration
+
+Create a `.env` at the repository root using `.env.example` as a template.
+
+Key settings (see `.env.example` for full list and documentation):
+
+- **Reddit**: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USERNAME`, `REDDIT_PASSWORD`, `REDDIT_USER_AGENT`
+- **Lemmy**: `LEMMY_URL` (e.g., `http://lemmy:8536` inside Docker or `https://lemmy.example.com`), `LEMMY_USER`, `LEMMY_PASS`
+- **Mapping**: `SUB_MAP` → `subreddit1:community1,subreddit2:community2`
+- **Data**: `DATA_DIR` → path inside the container (default `/app/data`)
+
+> Do **not** commit `.env` to version control.
+
+---
+
+## 🧱 Project Layout
 
 ```
 .
-├── auto_mirror.py
-├── comment_mirror.py
-├── edit_sync.py
-├── Dockerfile
-├── docker-compose.yml
-├── .env
-├── data/
-└── README.md
+├── auto_mirror.py              # Mirrors new Reddit submissions to Lemmy
+├── comment_mirror.py           # Mirrors full Reddit comment trees
+├── edit_sync.py                # Syncs edits from Reddit to Lemmy
+├── Dockerfile                  # Python 3.11 slim base
+├── docker-compose.example.yml  # Generic Compose (copy to docker-compose.yml)
+├── .env.example                # Example environment file
+├── data/                       # Local cache (tokens, mappings) - bind mounted
+└── docs/
+    └── maintenance.md          # Advanced ops & troubleshooting
 ```
 
 ---
 
-## ⚙️ Environment Configuration (`.env`)
+## 🐳 Deployment (Compose)
 
-Create a `.env` file in the project root and configure the following variables:
+- Use `docker-compose.example.yml` as a starting point.
+- Ensure the service attaches to your **external Lemmy Docker network** so the hostname `lemmy` resolves (or set `LEMMY_URL` to your public Lemmy URL).
 
-```ini
-# === Reddit API Credentials ===
-REDDIT_CLIENT_ID=your_reddit_app_id
-REDDIT_CLIENT_SECRET=your_reddit_app_secret
-REDDIT_USERNAME=your_reddit_bot_username
-REDDIT_PASSWORD=your_reddit_bot_password
-REDDIT_USER_AGENT=reddit-lemmy-bridge/1.0
-
-# === Lemmy Instance ===
-LEMMY_URL=http://lemmy:8536
-LEMMY_USER=mirrorbot
-LEMMY_PASS=your_lemmy_bot_password
-
-# === Mirroring Behavior ===
-SUB_MAP=subreddit1:community1,subreddit2:community2
-SLEEP_SECONDS=900
-MAX_POSTS_PER_RUN=5
-
-# === Comment Mirroring ===
-MIRROR_COMMENTS=true
-COMMENT_LIMIT=3
-COMMENT_LIMIT_TOTAL=500
-COMMENT_SLEEP=0.3
-
-# === Edit Sync ===
-MIRROR_EDITS=true
-EDIT_CHECK_LIMIT=50
-EDIT_SLEEP=0.5
-
-# === Internal Data Storage ===
-DATA_DIR=/app/data
-```
-
----
-
-## 📦 Quick Start: Using Example Files
-
-To simplify setup, this repository includes example configuration templates:
-
-| File | Purpose |
-|------|----------|
-| `.env.example` | Template for your Reddit and Lemmy credentials |
-| `docker-compose.example.yml` | Generic Docker Compose setup, compatible with most Lemmy-Ansible instances |
-
-Copy and edit them before deployment:
+Common commands:
 
 ```bash
-cp .env.example .env
-cp docker-compose.example.yml docker-compose.yml
+# Start only the main post-mirroring service
+docker compose up -d reddit-lemmy-bridge
+
+# Run comment mirror on demand
+docker compose run --rm reddit-comment-mirror
+# or refresh all mapped posts to fill missing comments
+docker compose run --rm reddit-comment-mirror --refresh
+
+# Run edit sync on demand
+docker compose run --rm reddit-edit-sync
 ```
 
-Then open `.env` and update your credentials and subreddit/community mappings.
+---
+
+## ✏️ Edit Synchronization
+
+The `reddit-edit-sync` service checks Reddit for edits and updates corresponding Lemmy posts/comments.
+
+```bash
+docker compose run --rm reddit-edit-sync
+```
+
+Configure cadence with `EDIT_CHECK_LIMIT` and `EDIT_SLEEP` in `.env` if desired.
 
 ---
 
-## 🗺️ Project Roadmap
+## 🔌 Testing Connectivity (Docker Networks)
 
-See [ROADMAP.md](./ROADMAP.md) for planned upgrades and new features.
+Ensure the bridge can reach Lemmy via Docker networking:
+
+```bash
+# 1) List networks and find your Lemmy-Ansible network
+docker network ls | grep lemmy
+
+# 2) Confirm the bridge service is attached
+docker network inspect <lemmy_network_name> | grep reddit-lemmy-bridge
+
+# 3) Optional: test DNS from inside the container
+docker compose exec reddit-lemmy-bridge getent hosts lemmy
+```
+
+If `lemmy` does not resolve, either attach to the correct external network in `docker-compose.yml` or set `LEMMY_URL` to your public instance URL (e.g., `https://lemmy.example.com`).
 
 ---
 
-## ❤️ Credits
+## 🧹 Maintenance & Troubleshooting
 
-Created by **Stuck7hrottle** and contributors.  
-Built with 🐍 Python, Docker, and caffeine.
+See **[docs/maintenance.md](./docs/maintenance.md)** for:
+- Safe resets and what the `data/` cache stores
+- Avoiding accidental re-mirroring
+- Rebuilding mapping files
+- Handling rate limits and retries
+- Common errors and resolutions
 
-> “Mirror freely, federate widely.” 🌍
+---
+
+## 🗺️ Roadmap
+
+See **[ROADMAP.md](./ROADMAP.md)** for planned features and enhancements.
+
+---
+
+## 📝 License
+
+Consider adding an open-source license (e.g., MIT) to welcome community contributions.

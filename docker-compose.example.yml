@@ -1,5 +1,5 @@
 # Reddit → Lemmy Bridge
-# Example docker-compose.yml (generic version for any Lemmy-Ansible setup)
+# Example docker-compose.yml (generic, network-neutral)
 
 services:
   reddit-lemmy-bridge:
@@ -27,6 +27,7 @@ services:
     volumes:
       - ./comment_mirror.py:/app/comment_mirror.py:ro
       - ./data:/app/data
+    # Use --refresh to fill missing comments
     command: ["python", "-u", "comment_mirror.py"]
     networks:
       - lemmy_net
@@ -50,5 +51,5 @@ services:
 networks:
   lemmy_net:
     external: true
-    # Replace this with your Lemmy-Ansible network name
+    # Replace with your Lemmy-Ansible network name (run: docker network ls | grep lemmy)
     name: <your_lemmy_network_name>_default
