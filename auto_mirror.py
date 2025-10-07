@@ -1,234 +1,317 @@
 #!/usr/bin/env python3
-import os, time, json, requests, mimetypes
-from datetime import datetime, timezone
+# -*- coding: utf-8 -*-
 
-# === CONFIG ===
-LEMMY_INSTANCE = os.getenv("LEMMY_INSTANCE", "http://lemmy:8536").rstrip("/")
+import os
+import json
+import time
+import traceback
+from pathlib import Path
+from typing import Dict, Any, Optional, Tuple
+
+import requests
+import praw
+from dotenv import load_dotenv
+
+# --------------------------
+# Load config
+# --------------------------
+load_dotenv()
+
+REDDIT_CLIENT_ID = os.getenv("REDDIT_CLIENT_ID")
+REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET")
+REDDIT_USERNAME = os.getenv("REDDIT_USERNAME")
+REDDIT_PASSWORD = os.getenv("REDDIT_PASSWORD")
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "reddit-lemmy-bridge/1.0")
+
+LEMMY_URL = (os.getenv("LEMMY_URL") or "http://lemmy:8536").rstrip("/")
 LEMMY_USER = os.getenv("LEMMY_USER")
 LEMMY_PASS = os.getenv("LEMMY_PASS")
-SUB_MAP = os.getenv("SUB_MAP", "")
+
+# Mapping of subreddit -> lemmy community name (comma-separated pairs "sub:community")
+SUB_MAP = os.getenv("SUB_MAP", "example:example")
+REDDIT_LIMIT = int(os.getenv("REDDIT_LIMIT", "10"))
 SLEEP_SECONDS = int(os.getenv("SLEEP_SECONDS", "900"))
-MIRROR_COMMENTS = os.getenv("MIRROR_COMMENTS", "true").lower() == "true"
-COMMENT_LIMIT_TOTAL = int(os.getenv("COMMENT_LIMIT_TOTAL", "500"))
-COMMENT_SLEEP = float(os.getenv("COMMENT_SLEEP", "0.3"))
-GALLERY_SLEEP = float(os.getenv("GALLERY_SLEEP", "1.0"))
+MAX_POSTS_PER_RUN = int(os.getenv("MAX_POSTS_PER_RUN", "5"))
 
-DATA_DIR = "data"
-TOKEN_CACHE = os.path.join(DATA_DIR, "token.json")
-COMMUNITY_CACHE = os.path.join(DATA_DIR, "communities.json")
-os.makedirs(DATA_DIR, exist_ok=True)
+DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-# === UTILITIES ===
-def log(msg): print(msg, flush=True)
-def load_json(path, default=None):
-    if os.path.exists(path):
-        try: return json.load(open(path))
-        except: pass
-    return default if default is not None else {}
-def save_json(path, data): json.dump(data, open(path, "w"))
+TOKEN_FILE = DATA_DIR / "lemmy_token.json"
+GLOBAL_MAP_FILE = DATA_DIR / "post_map.json"  # reddit_post_id -> { lemmy_post_id, ... }
 
-# === AUTH ===
-def get_lemmy_token():
-    cache = load_json(TOKEN_CACHE)
-    if cache and "jwt" in cache and (time.time() - cache.get("timestamp", 0) < 3600):
-        age = int(time.time() - cache["timestamp"])
-        log(f"🔁 Using cached Lemmy token (age={age}s)")
-        return cache["jwt"]
-    log(f"🔑 Logging in to {LEMMY_INSTANCE}/api/v3/user/login as {LEMMY_USER}")
-    r = requests.post(f"{LEMMY_INSTANCE}/api/v3/user/login",
-                      json={"username_or_email": LEMMY_USER, "password": LEMMY_PASS}, timeout=15)
-    if r.status_code != 200 or "jwt" not in r.json():
-        raise SystemExit(f"❌ Lemmy login failed: {r.text}")
-    token = r.json()["jwt"]
-    save_json(TOKEN_CACHE, {"jwt": token, "timestamp": time.time()})
-    log("✅ Logged into Lemmy (new token cached)")
-    return token
+# --------------------------
+# Helpers
+# --------------------------
+def log(msg: str) -> None:
+    print(msg, flush=True)
 
-def get_community_id(name, token):
-    cache = load_json(COMMUNITY_CACHE, {})
-    if name in cache:
-        return cache[name]
-    log(f"🔍 Resolving community '{name}'...")
-    r = requests.get(f"{LEMMY_INSTANCE}/api/v3/community", params={"name": name}, timeout=10)
-    if r.status_code != 200:
-        raise RuntimeError(f"Failed to fetch community '{name}': {r.text}")
-    cid = r.json()["community_view"]["community"]["id"]
-    cache[name] = cid
-    save_json(COMMUNITY_CACHE, cache)
-    log(f"✅ Found community '{name}' (ID={cid})")
-    return cid
-
-# === REDDIT FETCH ===
-def fetch_reddit_posts(subreddit):
-    url = f"https://www.reddit.com/r/{subreddit}/new.json?limit=10"
-    headers = {"User-Agent": "reddit-lemmy-bridge"}
-    r = requests.get(url, headers=headers, timeout=15)
-    if r.status_code != 200:
-        log(f"⚠️ Reddit fetch failed for r/{subreddit}: {r.status_code}")
-        return []
-    return [p["data"] for p in r.json()["data"]["children"]]
-
-# === PICTRS ===
-def upload_to_pictrs(media_url, token):
+def load_json(path: Path, default):
     try:
-        log(f"🖼️ Downloading {media_url}")
-        r = requests.get(media_url, stream=True, timeout=20)
-        if r.status_code != 200:
-            return None
-        ctype = r.headers.get("Content-Type", "image/jpeg")
-        ext = mimetypes.guess_extension(ctype.split(";")[0]) or ".jpg"
-        files = {"images[]": ("upload" + ext, r.content, ctype)}
-        res = requests.post(f"{LEMMY_INSTANCE}/pictrs/image",
-                            files=files, headers={"Authorization": f"Bearer {token}"}, timeout=30)
-        if res.status_code == 200 and "files" in res.json():
-            filehash = res.json()["files"][0]["file"]
-            url = f"{LEMMY_INSTANCE}/pictrs/image/{filehash}"
-            log(f"✅ Uploaded to Pictrs: {url}")
-            return url
+        if path.exists():
+            return json.loads(path.read_text(encoding="utf-8"))
     except Exception as e:
-        log(f"⚠️ Pictrs upload failed: {e}")
+        log(f"⚠️ Failed reading {path}: {e}")
+    return default
+
+def save_json(path: Path, obj) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+
+def parse_sub_map(raw: str) -> Dict[str, str]:
+    # "a:b,c:d" -> {"a":"b","c":"d"}
+    out = {}
+    for part in [p.strip() for p in raw.split(",") if p.strip()]:
+        if ":" in part:
+            s, c = [x.strip() for x in part.split(":", 1)]
+            if s and c:
+                out[s] = c
+    return out
+
+def reddit_client() -> praw.Reddit:
+    missing = [k for k, v in [
+        ("REDDIT_CLIENT_ID", REDDIT_CLIENT_ID),
+        ("REDDIT_CLIENT_SECRET", REDDIT_CLIENT_SECRET),
+        ("REDDIT_USERNAME", REDDIT_USERNAME),
+        ("REDDIT_PASSWORD", REDDIT_PASSWORD),
+    ] if not v]
+    if missing:
+        raise RuntimeError(f"Missing Reddit credentials in .env: {', '.join(missing)}")
+
+    return praw.Reddit(
+        client_id=REDDIT_CLIENT_ID,
+        client_secret=REDDIT_CLIENT_SECRET,
+        username=REDDIT_USERNAME,
+        password=REDDIT_PASSWORD,
+        user_agent=REDDIT_USER_AGENT,
+        ratelimit_seconds=5,
+    )
+
+# --------------------------
+# Lemmy API
+# --------------------------
+def lemmy_login(force: bool = False) -> str:
+    if not force and TOKEN_FILE.exists():
+        token = load_json(TOKEN_FILE, {})
+        if isinstance(token, dict) and token.get("jwt"):
+            return token["jwt"]
+
+    payload = {"username_or_email": LEMMY_USER, "password": LEMMY_PASS}
+    url = f"{LEMMY_URL}/api/v3/user/login"
+    log(f"🔑 Logging in to {url} as {LEMMY_USER}")
+    r = requests.post(url, json=payload, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError(f"Lemmy login failed: {r.status_code} {r.text}")
+    jwt = r.json().get("jwt")
+    if not jwt:
+        raise RuntimeError("No JWT returned by Lemmy login")
+    save_json(TOKEN_FILE, {"jwt": jwt, "cached_at": time.time()})
+    log("✅ Logged into Lemmy (token cached)")
+    return jwt
+
+def resolve_community_id(jwt: str, community_name: str) -> Optional[int]:
+    """
+    Try both ?name=<name> and ?name=c/<name> for compatibility.
+    Cache results in /app/data/community_cache.json.
+    """
+    cache_file = DATA_DIR / "community_cache.json"
+    cache = load_json(cache_file, {})
+
+    if community_name in cache:
+        return cache[community_name]
+
+    sess = requests.Session()
+    headers = {"Authorization": f"Bearer {jwt}"}
+
+    for nm in (community_name, f"c/{community_name}"):
+        url = f"{LEMMY_URL}/api/v3/community"
+        params = {"name": nm}
+        try:
+            r = sess.get(url, params=params, headers=headers, timeout=20)
+            if r.status_code == 200:
+                cid = r.json().get("community_view", {}).get("community", {}).get("id")
+                if cid:
+                    cache[community_name] = cid
+                    save_json(cache_file, cache)
+                    return cid
+        except Exception:
+            pass
+
+    log(f"⚠️ Could not resolve community_id for '{community_name}'")
     return None
 
-# === COMMENTS ===
-def mirror_comments_full(permalink, token, post_id, subreddit):
-    """Recursively mirror all Reddit comments (nested) into Lemmy."""
-    try:
-        url = f"{permalink}.json"
-        headers = {"User-Agent": "reddit-lemmy-bridge"}
-        r = requests.get(url, headers=headers, timeout=20)
-        if r.status_code != 200:
-            log(f"⚠️ Failed to fetch comments for {permalink}")
-            return
-        comments = r.json()[1]["data"]["children"]
-        posted_count = 0
-        map_file = os.path.join(DATA_DIR, f"lemmy_map_{subreddit}.json")
-        mapping = load_json(map_file, {})
-
-        def recurse_tree(nodes, parent=None):
-            nonlocal posted_count
-            for node in nodes:
-                if posted_count >= COMMENT_LIMIT_TOTAL:
-                    return
-                if node["kind"] != "t1":
-                    continue
-                d = node["data"]
-                content = d.get("body", "")
-                author = d.get("author", "[deleted]")
-                payload = {
-                    "content": f"{content}\n\n_Originally by u/{author}_",
-                    "post_id": post_id,
-                }
-                if parent:
-                    payload["parent_id"] = parent
-                rc = requests.post(f"{LEMMY_INSTANCE}/api/v3/comment",
-                                   json=payload,
-                                   headers={"Authorization": f"Bearer {token}"},
-                                   timeout=15)
-                if rc.status_code == 200:
-                    new_id = rc.json()["comment_view"]["comment"]["id"]
-                    reddit_cid = d["id"]
-                    mapping[reddit_cid] = {"lemmy_comment": new_id, "last_body": content}
-                    posted_count += 1
-                    log(f"💬 Comment {posted_count} by u/{author}")
-                    time.sleep(COMMENT_SLEEP)
-                    if "replies" in d and isinstance(d["replies"], dict):
-                        recurse_tree(d["replies"]["data"]["children"], new_id)
-                else:
-                    log(f"⚠️ Comment post failed: {rc.status_code}")
-                    time.sleep(COMMENT_SLEEP)
-
-        recurse_tree(comments)
-        save_json(map_file, mapping)
-        log(f"✅ Mirrored {posted_count} comments.")
-    except Exception as e:
-        log(f"⚠️ Comment mirror error: {e}")
-
-# === LEMMY POST ===
-def post_to_lemmy(post, token, community_id, subreddit):
-    """Post Reddit submissions to Lemmy with Pictrs and comment mirror."""
-    title = post["title"][:255]
-    permalink = f"https://reddit.com{post['permalink']}"
-    body = post.get("selftext", "").strip()
-    post_hint = post.get("post_hint", "")
-    media_url = post.get("url_overridden_by_dest")
-    is_gallery = post.get("is_gallery", False)
-    pictrs_urls = []
-
-    if is_gallery and "media_metadata" in post:
-        for m in post["media_metadata"].values():
-            if "s" in m and "u" in m["s"]:
-                u = m["s"]["u"].replace("&amp;", "&")
-                up = upload_to_pictrs(u, token)
-                if up: pictrs_urls.append(up)
-                time.sleep(GALLERY_SLEEP)
-    elif post_hint in ("image", "hosted:video") and media_url:
-        up = upload_to_pictrs(media_url, token)
-        if up: pictrs_urls.append(up)
-
-    payload = {"name": title, "community_id": community_id}
-    if pictrs_urls:
-        images_md = "\n".join([f"![image]({u})" for u in pictrs_urls])
-        text = (body + "\n\n" + images_md) if body else images_md
-        payload["body"] = f"{text}\n\n---\n[Original Reddit post]({permalink})"
-        payload["thumbnail_url"] = pictrs_urls[0]
-    elif body:
-        payload["body"] = f"{body}\n\n---\n[Original Reddit post]({permalink})"
-    elif media_url:
-        payload["url"] = media_url
-    else:
-        payload["body"] = f"[Original Reddit post]({permalink})"
-
-    r = requests.post(f"{LEMMY_INSTANCE}/api/v3/post",
-                      json=payload, headers={"Authorization": f"Bearer {token}"}, timeout=20)
-    if r.status_code != 200:
-        log(f"⚠️ Lemmy post failed ({r.status_code}): {r.text}")
-        return None
-    pid = r.json()["post_view"]["post"]["id"]
-    log(f"✅ Posted '{title}' (Lemmy ID={pid})")
-
-    # Map Reddit → Lemmy post
-    map_file = os.path.join(DATA_DIR, f"lemmy_map_{subreddit}.json")
-    mapping = load_json(map_file, {})
-    mapping[post["id"]] = {
-        "lemmy_post": pid,
-        "last_body": body,
-        "permalink": permalink
+def create_lemmy_post(jwt: str, community_id: int, name: str,
+                      body: Optional[str], url: Optional[str], nsfw: bool) -> Tuple[Optional[int], Optional[str]]:
+    payload: Dict[str, Any] = {
+        "name": name,
+        "community_id": community_id,
+        "nsfw": bool(nsfw),
+        "auth": jwt,
     }
-    save_json(map_file, mapping)
+    if body:
+        payload["body"] = body
+    if url:
+        payload["url"] = url
 
-    if MIRROR_COMMENTS:
-        mirror_comments_full(permalink, token, pid, subreddit)
-    return pid
+    for attempt in range(1, 4):
+        try:
+            r = requests.post(f"{LEMMY_URL}/api/v3/post", json=payload, timeout=30)
+            if r.status_code == 200:
+                pv = r.json().get("post_view", {})
+                pid = pv.get("post", {}).get("id")
+                apurl = pv.get("post", {}).get("ap_id")
+                if pid:
+                    return pid, apurl
+                log(f"⚠️ Post created but no ID in response: {r.text}")
+                return None, None
+            elif r.status_code == 401:
+                log("⚠️ Token invalid, refreshing...")
+                jwt = lemmy_login(force=True)
+                payload["auth"] = jwt
+                continue
+            elif r.status_code in (429, 502, 503):
+                log(f"⏳ Lemmy backoff {r.status_code}, attempt {attempt}/3")
+                time.sleep(5 * attempt)
+                continue
+            else:
+                log(f"⚠️ Lemmy responded {r.status_code}: {r.text}")
+                return None, None
+        except requests.RequestException as e:
+            log(f"⚠️ Network error during API call: {e} (attempt {attempt}/3)")
+            time.sleep(3)
 
-# === PER-SUB MIRROR ===
-def mirror_subreddit(subreddit, community, token):
-    cachefile = os.path.join(DATA_DIR, f"posted_{subreddit}.json")
-    seen = set(load_json(cachefile, []))
-    community_id = get_community_id(community, token)
-    posts = fetch_reddit_posts(subreddit)
-    for p in reversed(posts):
-        pid = p["id"]
-        if pid in seen:
-            continue
-        post_to_lemmy(p, token, community_id, subreddit)
-        seen.add(pid)
-        save_json(cachefile, list(seen)[-500:])
-    log(f"✅ Done r/{subreddit} → c/{community}")
+    log("❌ All retries failed for /api/v3/post")
+    return None, None
 
-# === MAIN LOOP ===
+# --------------------------
+# Compose Lemmy body with rich info
+# --------------------------
+def compose_body_with_footer(title: str, submission) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Returns (body, url)
+    - body includes Reddit permalink + author
+    - url is direct media/link if applicable (lets Lemmy render a preview)
+    """
+    permalink = f"https://www.reddit.com{submission.permalink}"
+    author = f"u/{submission.author.name}" if submission.author else "u/[deleted]"
+    nsfw = bool(getattr(submission, "over_18", False))
+
+    base_footer = f"\n\n---\nMirrored from r/{submission.subreddit.display_name} by {author}\n{permalink}"
+
+    # Self post
+    if submission.is_self:
+        body = (submission.selftext or "").strip()
+        full_body = (body + base_footer).strip() if body else base_footer.strip()
+        return full_body, None
+
+    # Link / image / gallery
+    link_url = getattr(submission, "url", None)
+    body = f"(Preview link below)\n{base_footer}".strip()
+    return body, link_url
+
+# --------------------------
+# Mapping writers
+# --------------------------
+def save_per_sub_map(subreddit: str, reddit_post_id: str, lemmy_post_id: int,
+                     body_snapshot: str, permalink: str) -> None:
+    sub_map_file = DATA_DIR / f"lemmy_map_{subreddit}.json"
+    sub_map = load_json(sub_map_file, {})
+    sub_map[reddit_post_id] = {
+        "lemmy_post": lemmy_post_id,
+        "last_body": body_snapshot,
+        "permalink": permalink,
+        "updated_at": int(time.time()),
+    }
+    save_json(sub_map_file, sub_map)
+
+def save_global_map(reddit_post_id: str, lemmy_post_id: int,
+                    subreddit: str, community: str, permalink: str) -> None:
+    global_map = load_json(GLOBAL_MAP_FILE, {})
+    global_map[reddit_post_id] = {
+        "lemmy_post_id": lemmy_post_id,
+        "subreddit": subreddit,
+        "community": community,
+        "permalink": permalink,
+        "updated_at": int(time.time()),
+    }
+    save_json(GLOBAL_MAP_FILE, global_map)
+
+# --------------------------
+# Main loop
+# --------------------------
+def mirror_once():
+    sub_map = parse_sub_map(SUB_MAP)
+    if not sub_map:
+        log("⚠️ SUB_MAP is empty. Nothing to mirror.")
+        return
+
+    reddit = reddit_client()
+    jwt = lemmy_login()
+    community_cache: Dict[str, int] = {}
+
+    posts_mirrored = 0
+
+    for subreddit, community in sub_map.items():
+        try:
+            # ensure community id
+            if community not in community_cache:
+                cid = resolve_community_id(jwt, community)
+                if not cid:
+                    log(f"⚠️ Skipping r/{subreddit}: unable to resolve community '{community}'")
+                    continue
+                community_cache[community] = cid
+            community_id = community_cache[community]
+
+            log(f"🔍 Checking r/{subreddit} → c/{community} @ {time.strftime('%Y-%m-%d %H:%M:%S %z')}")
+            per_file = DATA_DIR / f"lemmy_map_{subreddit}.json"
+            already = set(load_json(per_file, {}).keys())
+
+            # fetch new reddit posts
+            submissions = list(reddit.subreddit(subreddit).new(limit=REDDIT_LIMIT))
+            # newest last → post in chronological order
+            submissions = list(reversed(submissions))
+
+            for s in submissions:
+                if posts_mirrored >= MAX_POSTS_PER_RUN:
+                    break
+
+                rid = s.id
+                if rid in already:
+                    continue
+
+                title = (s.title or "").strip()[:300]
+                body, link_url = compose_body_with_footer(title, s)
+                nsfw = bool(getattr(s, "over_18", False))
+                pid, ap = create_lemmy_post(
+                    jwt=jwt,
+                    community_id=community_id,
+                    name=title,
+                    body=body,
+                    url=link_url,
+                    nsfw=nsfw,
+                )
+                if pid:
+                    log(f"✅ Posted '{title}' (Lemmy ID={pid})")
+                    permalink = f"https://www.reddit.com{s.permalink}"
+                    save_per_sub_map(subreddit, rid, pid, (s.selftext or "")[:5000], permalink)
+                    save_global_map(rid, pid, subreddit, community, permalink)
+                    log(f"💾 Added mapping: {rid} → Lemmy {pid}")
+                    posts_mirrored += 1
+                else:
+                    log("⚠️ Failed to post submission.")
+
+            log(f"✅ Done r/{subreddit} → c/{community}")
+        except Exception as e:
+            log(f"❌ Error processing r/{subreddit}: {e}")
+            traceback.print_exc()
+
+    if posts_mirrored == 0:
+        log("ℹ️ No new posts this cycle.")
+
 def main():
-    pairs = [x.split(":") for x in SUB_MAP.split(",") if ":" in x]
-    if not pairs:
-        raise SystemExit("❌ SUB_MAP not set correctly (expected 'sub:community,...').")
     while True:
-        token = get_lemmy_token()
-        for sub, comm in pairs:
-            try:
-                log(f"\n🔍 Checking r/{sub.strip()} → c/{comm.strip()} @ {datetime.now(timezone.utc)}")
-                mirror_subreddit(sub.strip(), comm.strip(), token)
-            except Exception as e:
-                log(f"⚠️ Error mirroring {sub}: {e}")
-        log(f"🕒 Sleeping {SLEEP_SECONDS}s...\n")
+        mirror_once()
+        log(f"🕒 Sleeping {SLEEP_SECONDS}s...")
         time.sleep(SLEEP_SECONDS)
 
 if __name__ == "__main__":
