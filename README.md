@@ -1,140 +1,121 @@
 # Reddit → Lemmy Bridge
 
-A self-hosted bridge that mirrors Reddit posts, edits, and comments into Lemmy communities.  
-Compatible with Docker and Lemmy-Ansible deployments.
+A self-hosted bridge that mirrors posts and comments from selected Reddit communities (subreddits) into corresponding Lemmy communities — keeping content synchronized and formatted for federated discussion.
 
 ---
 
 ## 🚀 Quick Start (Docker)
 
+Clone the repository and configure your `.env` file:
+
 ```bash
-git clone https://github.com/yourname/Reddit-Mirror-2-Lemmy.git
-cd Reddit-Mirror-2-Lemmy
 cp .env.example .env
+```
+
+Then start the bridge:
+
+```bash
 docker compose up -d reddit-lemmy-bridge
 ```
+
+The bridge will automatically:
+- Log in to your Lemmy instance using Bearer token authentication
+- Mirror posts and comments from defined Reddit subs
+- Cache tokens and community mappings for reuse
 
 ---
 
 ## ⚙️ Environment Configuration
 
-Edit `.env` to match your Reddit and Lemmy credentials.
+Set these environment variables in your `.env` file:
 
-```ini
-# --- Reddit API credentials ---
-REDDIT_CLIENT_ID=your_client_id
-REDDIT_CLIENT_SECRET=your_secret
-REDDIT_USERNAME=your_username
-REDDIT_PASSWORD=your_password
-REDDIT_USER_AGENT=reddit-lemmy-bridge/1.0
-
-# --- Lemmy credentials ---
-LEMMY_URL=http://lemmy:8536
-LEMMY_USER=mirrorbot
-LEMMY_PASS=securepassword
-LEMMY_COMMUNITY=example
-
-# --- Mirroring options ---
-SUB_MAP=fosscad2:fosscad2,FOSSCADtoo:FOSSCADtoo,3d2a:3d2a
-REDDIT_LIMIT=10
-SLEEP_SECONDS=900
-DATA_DIR=/data
-
-# --- Optional limits ---
-MAX_POSTS_PER_RUN=5
-COMMENT_LIMIT_TOTAL=500
-COMMENT_SLEEP=0.3
-MIRROR_COMMENTS=true
-```
+| Variable | Description | Example |
+|-----------|-------------|----------|
+| `LEMMY_URL` | Your Lemmy base URL (public address) | `https://your-lemmy-instance.com` |
+| `LEMMY_USER` | Lemmy bot username | `mirrorbot` |
+| `LEMMY_PASS` | Lemmy bot password | `yourStrongPassword` |
+| `SUB_MAP` | Comma-separated mapping of Reddit→Lemmy communities | `fosscad2:fosscad2,3d2a:3d2a,example:Example` |
+| `DATA_DIR` | Path for token and cache data | `/app/data` |
+| `REFRESH` | Force community map refresh on startup | `true` |
 
 ---
 
-## 🧱 Deployment
+## 🧩 Lemmy Compatibility
 
-```bash
-docker compose up -d reddit-lemmy-bridge
+This bridge supports **Lemmy v0.19.x and later**, which use **JWT Bearer authentication** instead of the deprecated `"auth"` field.
+
+All API requests now send:
+```http
+Authorization: Bearer <token>
 ```
-Logs:
-```bash
-docker compose logs -f reddit-lemmy-bridge
-```
+
+The bridge automatically logs in when needed and reuses tokens between runs.
 
 ---
 
-## 💬 Comment Mirroring
+## 🧠 Token & Map Caching
 
-To sync Reddit comments into Lemmy:
+Tokens and community maps are cached inside the container:
 
-```bash
-docker compose run --rm reddit-comment-mirror
-```
+- **Token file:** `/app/data/token.json`
+- **Community map:** `/app/data/community_map.json`
 
-Rebuild all comment threads or fill missing ones:
-
-```bash
-docker compose run --rm -e REFRESH=true reddit-comment-mirror
-```
-
-A `comment_map.json` file is stored in `/data` to prevent duplicates.
+The map automatically refreshes every **6 hours**, or immediately if `REFRESH=true` is set.
 
 ---
 
-## ✏️ Edit Synchronization
+## 🔄 Comment Mirroring
 
-```bash
-docker compose run --rm edit-sync
-```
-
-Updates existing posts and comments if edited on Reddit.
+Each mirrored post is created on Lemmy with the original Reddit permalink and media preview embedded in the body.  
+Comments are synchronized below the corresponding Lemmy post, preserving structure and order.
 
 ---
 
 ## 🧰 Maintenance
 
+To safely reset caches or re-mirror all posts:
+
 ```bash
+docker compose down
 rm -rf data/*
-docker compose run --rm -e REFRESH=true reddit-comment-mirror
+docker compose up -d reddit-lemmy-bridge
 ```
 
-See [`docs/maintenance.md`](docs/maintenance.md) for details.
+To trigger an immediate refresh of community mappings:
+```bash
+docker compose run --rm -e REFRESH=true reddit-lemmy-bridge
+```
 
 ---
 
-## 🔍 Testing Connectivity
+## 🧪 Testing Connectivity
 
-Check Docker network resolution:
+Verify your Lemmy instance API before running the bridge:
 
 ```bash
-docker network inspect example_default | grep reddit-lemmy-bridge
+curl -s -o /dev/null -w "%{http_code}\n" https://your-lemmy-instance.com/api/v3/site
 ```
-
-If needed, attach to Lemmy’s network:
-
-```yaml
-networks:
-  lemmy_net:
-    external: true
-    name: example_default
-```
+If you see `200`, the bridge can connect successfully.
 
 ---
 
-## 🧩 Tools Included
+## 🧩 Troubleshooting
 
-| Script | Purpose |
-|---------|----------|
-| `auto_mirror.py` | Mirrors Reddit submissions |
-| `comment_mirror.py` | Syncs Reddit comments |
-| `edit_sync.py` | Mirrors Reddit edits |
-
----
-
-## 🗺️ Roadmap
-
-See [`ROADMAP.md`](ROADMAP.md).
+| Issue | Cause | Solution |
+|-------|--------|-----------|
+| **401 `incorrect_login`** | Lemmy password changed or token expired | Restart container to refresh token |
+| **404 `couldnt_find_community`** | Mismatched names in `SUB_MAP` | Ensure Lemmy and Reddit names match exactly |
+| **duplicate key `login_token_pkey`** | Rapid login attempts | Fixed in Bearer-auth version; ensure cooldown remains active |
+| **Empty mirrors** | Reddit API rate limits or no new posts | Wait for next cycle or set `REFRESH=true` |
 
 ---
 
-## 📜 License
+## 🧭 Roadmap
 
-MIT License © 2025 YourName
+See [ROADMAP.md](docs/ROADMAP.md) for current development phases and future goals.
+
+---
+
+## 🪪 License
+
+MIT License — open source, self-hosted, and federated.
