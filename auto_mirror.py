@@ -28,6 +28,8 @@ LEMMY_URL = os.getenv("LEMMY_URL", "https://fosscad.guncaddesigns.com").rstrip("
 LEMMY_USER = os.getenv("LEMMY_USER", "mirrorbot")
 LEMMY_PASS = os.getenv("LEMMY_PASS", "password")
 
+TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
+
 # ─────────────────────────────────────────────
 # SUBREDDIT → COMMUNITY MAP
 # ─────────────────────────────────────────────
@@ -204,18 +206,41 @@ def mirror_comments(sub, post_id, comments, jwt):
     headers = {"Authorization": f"Bearer {jwt}"}
 
     for c in comments:
+        if not hasattr(c, "body"):
+            continue
+
+        content = getattr(c, "body", "").strip()
+        if not content:
+            continue
+
         payload = {
-            "content": c["body"],
+            "content": content,
             "post_id": post_id,
         }
-        r = requests.post(url, json=payload, headers=headers, timeout=20)
-        if r.status_code == 401:
-            log("⚠️ Comment post 401, retrying with refreshed token…")
-            new_jwt = lemmy_login(force=True)
-            headers["Authorization"] = f"Bearer {new_jwt}"
+
+        try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
-        if not r.ok:
-            log(f"⚠️ Comment failed: {r.status_code} {r.text[:200]}")
+            if r.status_code == 401:
+                log("⚠️ Comment post 401, retrying with refreshed token…")
+                new_jwt = lemmy_login(force=True)
+                headers["Authorization"] = f"Bearer {new_jwt}"
+                r = requests.post(url, json=payload, headers=headers, timeout=20)
+
+            # Handle Lemmy rate limits gracefully
+            if r.status_code == 400 and "rate_limit" in r.text:
+                log("⏳ Rate limited — sleeping 10s before next comment…")
+                time.sleep(10)
+                continue
+
+            if not r.ok:
+                log(f"⚠️ Comment failed: {r.status_code} {r.text[:200]}")
+                continue
+
+            # Short sleep to prevent hammering Lemmy
+            time.sleep(3)
+
+        except Exception as e:
+            log(f"⚠️ Error posting comment: {e}")
             continue
 
     log(f"✅ Mirrored {len(comments)} comments.")
@@ -236,23 +261,46 @@ def mirror_once():
             log(f"❌ Skipping {reddit_sub}: {e}")
             continue
 
-        # Example placeholder for Reddit posts (replace with API logic)
-        mock_post = {
-            "title": "Example mirrored post",
-            "url": "https://i.redd.it/example.png",
-            "permalink": f"/r/{reddit_sub}/example",
-            "selftext": "Example body text.",
-        }
+        if TEST_MODE:
+            log("🧪 TEST_MODE active — posting sample content instead of real Reddit posts.")
+            mock_post = {
+                "title": "Example mirrored post",
+                "url": f"https://reddit.com/r/{reddit_sub}/test",
+                "permalink": f"/r/{reddit_sub}/comments/test",
+                "selftext": "✅ Test successful: Reddit → Lemmy bridge is connected."
+            }
+            try:
+                pid = create_lemmy_post(reddit_sub, mock_post, jwt, comm_id)
+                if pid:
+                    mirror_comments(reddit_sub, pid, [], jwt)
+            except Exception as e:
+                log(f"⚠️ Error creating test post: {e}")
 
-        try:
-            pid = create_lemmy_post(reddit_sub, mock_post, jwt, comm_id)
-            if pid:
-                mirror_comments(reddit_sub, pid, [], jwt)
-        except Exception as e:
-            log(f"⚠️ Error creating post: {e}")
+        else:
+            log(f"🔄 Live mode: Fetching from Reddit API (limit={os.getenv('REDDIT_LIMIT', 10)})…")
+            # Import Reddit client only if needed
+            import praw
+            reddit = praw.Reddit(
+                client_id=os.getenv("REDDIT_CLIENT_ID"),
+                client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
+                user_agent="reddit-lemmy-bridge"
+            )
+            subreddit_obj = reddit.subreddit(reddit_sub)
+            for submission in subreddit_obj.new(limit=int(os.getenv("REDDIT_LIMIT", 10))):
+                post_data = {
+                    "title": submission.title,
+                    "url": submission.url,
+                    "permalink": submission.permalink,
+                    "selftext": submission.selftext,
+                }
+                try:
+                    pid = create_lemmy_post(reddit_sub, post_data, jwt, comm_id)
+                    if pid:
+                        mirror_comments(reddit_sub, pid, submission.comments[:3], jwt)
+                except Exception as e:
+                    log(f"⚠️ Error creating post from Reddit: {e}")
 
     log(f"🕒 Sleeping {SLEEP_BETWEEN_CYCLES}s...")
-
 
 # ─────────────────────────────────────────────
 # ENTRY POINT
