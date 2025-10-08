@@ -54,12 +54,26 @@ SLEEP_BETWEEN_CYCLES = 900  # 15 min between full cycles
 
 token_state = {}
 
-# ─────────────────────────────────────────────
-# UTILITIES
-# ─────────────────────────────────────────────
 def log(msg: str):
     print(f"{datetime.utcnow().isoformat()} | {msg}", flush=True)
 
+# ─────────────────────────────────────────────
+# POST MAP (PERSISTENT TRACKING)
+# ─────────────────────────────────────────────
+if POST_MAP_FILE.exists():
+    try:
+        post_map = json.loads(POST_MAP_FILE.read_text())
+        log(f"🗂️ Loaded {len(post_map)} mirrored posts from {POST_MAP_FILE}")
+    except Exception as e:
+        log(f"⚠️ Failed to read post_map.json: {e}")
+        post_map = {}
+else:
+    post_map = {}
+    log("📂 No post_map.json found, starting fresh.")
+
+# ─────────────────────────────────────────────
+# UTILITIES
+# ─────────────────────────────────────────────
 
 def load_json(path, default=None):
     if not Path(path).exists():
@@ -72,9 +86,11 @@ def load_json(path, default=None):
 
 def save_json(path, data):
     tmp = Path(str(path) + ".tmp")
-    json.dump(data, open(tmp, "w"), indent=2)
+    with open(tmp, "w") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
     tmp.replace(path)
-
 
 # ─────────────────────────────────────────────
 # LEMMY AUTHENTICATION (STABLE TOKEN REUSE)
@@ -287,6 +303,9 @@ def mirror_once():
             )
             subreddit_obj = reddit.subreddit(reddit_sub)
             for submission in subreddit_obj.new(limit=int(os.getenv("REDDIT_LIMIT", 10))):
+                if submission.id in post_map:
+                    log(f"⏭️ Skipping already mirrored post: {submission.title}")
+                    continue
                 post_data = {
                     "title": submission.title,
                     "url": submission.url,
@@ -297,6 +316,15 @@ def mirror_once():
                     pid = create_lemmy_post(reddit_sub, post_data, jwt, comm_id)
                     if pid:
                         mirror_comments(reddit_sub, pid, submission.comments[:3], jwt)
+                        # Save post mapping
+                        post_map[submission.id] = {
+                                "title": submission.title,
+                                "lemmy_id": pid,
+                                "timestamp": datetime.utcnow().isoformat()
+                        }
+                        save_json(POST_MAP_FILE, post_map)
+                        log(f"💾 Saved post_map.json ({len(post_map)} total entries)")
+
                 except Exception as e:
                     log(f"⚠️ Error creating post from Reddit: {e}")
 
