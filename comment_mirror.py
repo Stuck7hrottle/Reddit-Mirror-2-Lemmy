@@ -64,6 +64,36 @@ print(f"{'🔁' if REFRESH else '▶️'} comment_mirror.py starting (refresh={R
 # --------------------------
 # Helpers
 # --------------------------
+
+# Determine whether this Lemmy instance supports 'Old' or 'Oldest' sort key
+LEM_MY_SORT_KEY = None
+
+def detect_lemmy_sort_key(jwt: str) -> str:
+    """
+    Detects whether the connected Lemmy instance expects 'Old' or 'Oldest' for comment sort.
+    Caches the result globally to avoid repeated 400 errors.
+    """
+    global LEM_MY_SORT_KEY
+
+    if LEM_MY_SORT_KEY:
+        return LEM_MY_SORT_KEY
+
+    test_url = f"{LEMMY_URL}/api/v3/comment/list"
+    params = {"limit": 1, "page": 1, "sort": "Old", "auth": jwt}
+
+    try:
+        resp = requests.get(test_url, params=params, timeout=10)
+        if resp.status_code == 400 and "unknown variant" in resp.text:
+            print("↩️ Lemmy API does not support 'Old'; falling back to 'Oldest'")
+            LEM_MY_SORT_KEY = "Oldest"
+        else:
+            LEM_MY_SORT_KEY = "Old"
+    except Exception as e:
+        print(f"⚠️ Lemmy sort key detection failed, defaulting to 'Old': {e}")
+        LEM_MY_SORT_KEY = "Old"
+
+    return LEM_MY_SORT_KEY
+
 def load_json(path: Path, default):
     if path.exists():
         try:
@@ -205,27 +235,53 @@ def get_or_refresh_jwt(force: bool = False) -> str:
         return jwt
 
 def get_existing_lemmy_comments(post_id: int) -> Dict[str, int]:
+    """
+    Retrieve all existing Lemmy comments for a given post, with pagination.
+    Auto-detects and reuses the correct Lemmy sort key ('Old' or 'Oldest').
+    """
     url = f"{LEMMY_URL}/api/v3/comment/list"
-    params = {"post_id": post_id, "sort": "Oldest", "limit": 50, "page": 1}
     existing: Dict[str, int] = {}
+
+    sort_value = detect_lemmy_sort_key(jwt)  # detect once and cache globally
+    params = {"post_id": post_id, "sort": sort_value, "limit": 50, "page": 1}
+
     while True:
-        r = requests.get(url, params=params, timeout=30)
-        if r.status_code != 200:
-            print(f"⚠️ Failed to list comments for post {post_id}: {r.status_code} {r.text}")
+        try:
+            r = requests.get(url, params=params, timeout=30)
+
+            # Fallback for older Lemmy servers that don't support 'Old'
+            if r.status_code == 400 and "unknown variant" in r.text and sort_value == "Old":
+                sort_value = "Oldest"
+                params["sort"] = sort_value
+                print(f"↩️ Lemmy API rejected 'Old'; retrying with 'Oldest'")
+                r = requests.get(url, params=params, timeout=30)
+
+            if r.status_code != 200:
+                print(f"⚠️ Failed to list comments for post {post_id}: {r.status_code} {r.text}")
+                break
+
+            data = r.json()
+            comments = data.get("comments", [])
+            if not comments:
+                break
+
+            for c in comments:
+                cid = c.get("comment", {}).get("id")
+                content = c.get("comment", {}).get("content", "") or ""
+                sig = (content[:120]).strip()
+                if cid and sig:
+                    existing[sig] = cid
+
+            # stop if this page was shorter than the limit
+            if len(comments) < params["limit"]:
+                break
+
+            params["page"] += 1
+
+        except Exception as e:
+            print(f"⚠️ Exception while listing comments for post {post_id}: {e}")
             break
-        data = r.json()
-        comments = data.get("comments", [])
-        if not comments:
-            break
-        for c in comments:
-            cid = c.get("comment", {}).get("id")
-            content = c.get("comment", {}).get("content", "") or ""
-            sig = (content[:120]).strip()
-            if cid and sig:
-                existing[sig] = cid
-        if len(comments) < params["limit"]:
-            break
-        params["page"] += 1
+
     return existing
 
 def post_lemmy_comment(jwt: str, post_id: int, content: str, parent_id: Optional[int]) -> Optional[int]:
