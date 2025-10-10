@@ -1,17 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+"""
+Comment mirroring with SQLite cache + JSON migration.
+- Reads legacy comment_map.json and migrates into SQLite on startup (keeps JSON as backup).
+- Uses SQLite for duplicate detection and parent mapping going forward.
+"""
+
 import os
 import json
 import time
 import argparse
 from pathlib import Path
-from typing import Dict, Any, Tuple, Optional
+from typing import Dict, Any, Optional
 
 import requests
 import praw
 from praw.models import Comment
 from dotenv import load_dotenv
+
+from db_cache import DB
 
 # --------------------------
 # Config / .env
@@ -31,17 +39,13 @@ LEMMY_PASS = os.getenv("LEMMY_PASS_COMMENTS") or os.getenv("LEMMY_PASS")
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
-POST_MAP_FILE = DATA_DIR / "post_map.json"
-COMMENT_MAP_FILE = DATA_DIR / "comment_map.json"
+POST_MAP_FILE = DATA_DIR / "post_map.json"          # legacy (read-only in this branch)
+COMMENT_MAP_FILE = DATA_DIR / "comment_map.json"    # legacy (read-only in this branch)
 
 COMMENT_SLEEP = float(os.getenv("COMMENT_SLEEP", "0.3"))
 COMMENT_LIMIT_TOTAL = int(os.getenv("COMMENT_LIMIT_TOTAL", "500"))
 
-from pathlib import Path
-import os
-
-TOKEN_FILE = Path(os.getenv("TOKEN_FILE_COMMENTS", "/app/data/token.json"))
-
+TOKEN_FILE = Path(os.getenv("TOKEN_FILE_COMMENTS", str(DATA_DIR / "token.json")))
 
 # --------------------------
 # CLI / REFRESH flag
@@ -95,13 +99,6 @@ def reddit_comment_signature(comment: Comment) -> str:
 # Lemmy API
 # --------------------------
 def lemmy_login(force: bool = False) -> str:
-    """
-    Logs into Lemmy and caches the JWT token.
-    Handles rate_limit_error gracefully with backoff and retry.
-    """
-    import time
-
-    # ✅ Use cached token if available and not forced to refresh
     if not force and TOKEN_FILE.exists():
         data = load_json(TOKEN_FILE, {})
         jwt = data.get("jwt")
@@ -111,9 +108,7 @@ def lemmy_login(force: bool = False) -> str:
     payload = {"username_or_email": LEMMY_USER, "password": LEMMY_PASS}
     url = f"{LEMMY_URL}/api/v3/user/login"
 
-    # Retry loop with exponential backoff
     for attempt in range(5):
-        # 🧩 Prevent rapid re-logins (avoid rate_limit_error)
         global LAST_LOGIN_TIME
         if "LAST_LOGIN_TIME" not in globals():
             LAST_LOGIN_TIME = 0
@@ -128,7 +123,6 @@ def lemmy_login(force: bool = False) -> str:
         print(f"🔑 Logging in to {url} as {LEMMY_USER} (attempt {attempt + 1}/5)")
         r = requests.post(url, json=payload, timeout=30)
 
-        # Handle rate limit gracefully
         if r.status_code == 400 and "rate_limit_error" in r.text:
             wait_time = 120 + attempt * 30
             print(f"⚠️ Lemmy rate limit hit. Waiting {wait_time}s before retry...")
@@ -145,7 +139,6 @@ def lemmy_login(force: bool = False) -> str:
         save_json(TOKEN_FILE, {"jwt": jwt, "cached_at": time.time()})
         print("✅ Logged into Lemmy (token cached)")
 
-        # ✅ Now that we have a token, identify which user this is
         try:
             user_info = requests.get(
                 f"{LEMMY_URL}/api/v3/site",
@@ -166,7 +159,7 @@ def lemmy_login(force: bool = False) -> str:
         except Exception as e:
             print(f"⚠️ Error verifying Lemmy user: {e}")
 
-        return jwt  # ✅ Keep this — returns the working token
+        return jwt
 
     raise RuntimeError("Lemmy login failed after multiple retries.")
 
@@ -177,24 +170,12 @@ _jwt_cache = None
 _token_lock = threading.Lock()
 
 def get_or_refresh_jwt(force: bool = False) -> str:
-    """
-    Returns a cached JWT if valid; refreshes it if expired or rejected by Lemmy.
-    """
     global _jwt_cache
     with _token_lock:
         now = time.time()
-
-        # Ensure _jwt_cache always has the expected structure
         if not isinstance(_jwt_cache, dict):
             _jwt_cache = {"token": None, "timestamp": 0}
-
-        # Use cached token if valid
-        if (
-            not force
-            and _jwt_cache.get("token")
-            and (now - _jwt_cache.get("timestamp", 0)) < 3600
-        ):
-            # ✅ Test cached token before returning
+        if (not force) and _jwt_cache.get("token") and (now - _jwt_cache.get("timestamp", 0)) < 3600:
             test = requests.get(
                 f"{LEMMY_URL}/api/v3/site",
                 headers={"Authorization": f"Bearer {_jwt_cache['token']}"},
@@ -205,11 +186,9 @@ def get_or_refresh_jwt(force: bool = False) -> str:
             else:
                 print("⚠️ Cached JWT invalid — forcing refresh")
 
-        # ♻️ Refresh if forced or token invalid
         print("♻️ Refreshing Lemmy JWT (scheduled or forced)...")
         jwt = lemmy_login(force=True)
 
-        # ✅ Double-check token validity right after login
         verify = requests.get(
             f"{LEMMY_URL}/api/v3/site",
             headers={"Authorization": f"Bearer {jwt}"},
@@ -250,38 +229,23 @@ def get_existing_lemmy_comments(post_id: int) -> Dict[str, int]:
     return existing
 
 def post_lemmy_comment(jwt: str, post_id: int, content: str, parent_id: Optional[int]) -> Optional[int]:
-    """
-    Post a comment to Lemmy with smart retry logic:
-    - Sends JWT via Authorization header (modern API requirement)
-    - Refreshes JWT if expired
-    - Handles rate limits and transient errors gracefully
-    """
     url = f"{LEMMY_URL}/api/v3/comment"
     payload = {"post_id": post_id, "content": content}
     if parent_id is not None:
         payload["parent_id"] = parent_id
-
     headers = {"Authorization": f"Bearer {jwt}"}
 
     for attempt in range(1, 4):
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=30)
-
-            # 🟢 Success
             if r.status_code == 200:
-                comment_id = (
-                    r.json()
-                    .get("comment_view", {})
-                    .get("comment", {})
-                    .get("id")
-                )
+                comment_id = r.json().get("comment_view", {}).get("comment", {}).get("id")
                 if comment_id:
                     print(f"✅ Comment posted (Lemmy ID={comment_id})")
                 else:
                     print(f"⚠️ Lemmy responded 200 but no comment ID returned: {r.text[:180]}")
                 return comment_id
 
-            # 🔑 Expired/invalid JWT
             if r.status_code == 401 or "jwt" in r.text.lower() or "login" in r.text.lower():
                 print("🔄 JWT appears invalid — refreshing once...")
                 jwt = get_or_refresh_jwt(force=True)
@@ -289,7 +253,6 @@ def post_lemmy_comment(jwt: str, post_id: int, content: str, parent_id: Optional
                 time.sleep(2)
                 continue
 
-            # ⏳ Lemmy rate limit
             if r.status_code in (400, 429, 502, 503):
                 if "rate_limit_error" in r.text:
                     wait_time = 60 * attempt
@@ -300,7 +263,6 @@ def post_lemmy_comment(jwt: str, post_id: int, content: str, parent_id: Optional
                 time.sleep(5)
                 continue
 
-            # ❌ Other errors
             print(f"⚠️ Lemmy responded {r.status_code}: {r.text[:180]}")
             return None
 
@@ -342,19 +304,18 @@ def load_comment_map() -> Dict[str, Dict[str, int]]:
     return load_json(COMMENT_MAP_FILE, {})
 
 def save_comment_map(comment_map: Dict[str, Dict[str, int]]) -> None:
-    save_json(COMMENT_MAP_FILE, comment_map)
+    save_json(COMMENT_MAP_FILE, comment_map)  # legacy write maintained (backup)
 
 def get_lemmy_post_id(entry: Any) -> Optional[int]:
     if isinstance(entry, int):
         return entry
     if isinstance(entry, dict):
-        val = (
-            entry.get("lemmy_id")
-            or entry.get("lemmy_post_id")
-            or entry.get("lemmyPostId")
-        )
+        val = (entry.get("lemmy_id") or entry.get("lemmy_post_id") or entry.get("lemmyPostId"))
         if isinstance(val, int):
             return val
+        # accept numeric strings
+        if isinstance(val, str) and val.isdigit():
+            return int(val)
     return None
 
 # --------------------------
@@ -366,7 +327,30 @@ def compose_comment_body(c: Comment) -> str:
         body = ""
     return f"{author_label(c)}\n\n{sanitise_markdown(body)}".strip()
 
-def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment_map):
+def migrate_legacy_comments_to_sqlite(db: DB, legacy_map: Dict[str, Dict[str, int]]) -> None:
+    """Import legacy JSON comment_map structure into SQLite once (keeps JSON intact)."""
+    if not legacy_map:
+        print("ℹ️ No legacy comment_map.json entries to migrate.")
+        return
+
+    imported = skipped = 0
+    for reddit_post_id, cm in legacy_map.items():
+        if not isinstance(cm, dict):
+            continue
+        for reddit_comment_id, lemmy_comment_id in cm.items():
+            try:
+                if db.get_lemmy_comment_id(reddit_comment_id):
+                    skipped += 1
+                    continue
+                # parent info is not present in legacy JSON
+                db.save_comment(str(reddit_comment_id), str(lemmy_comment_id), None, None)
+                imported += 1
+            except Exception as e:
+                print(f"⚠️ Comment migration error for rid={reddit_comment_id}: {e}")
+
+    print(f"📦 Comment migration complete: imported={imported}, skipped(existing)={skipped} (JSON kept as backup).")
+
+def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment_map, db: DB):
     per_post_map = comment_map.setdefault(reddit_post_id, {})
     existing_lemmy_sig = get_existing_lemmy_comments(lemmy_post_id) if REFRESH else {}
 
@@ -384,12 +368,20 @@ def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment
         if total_processed >= COMMENT_LIMIT_TOTAL:
             print(f"⏹️ Reached COMMENT_LIMIT_TOTAL={COMMENT_LIMIT_TOTAL} for {reddit_post_id}")
             break
+
         rid = getattr(c, "id", None)
         if not rid:
             continue
         total_processed += 1
 
+        # Skip if present in legacy JSON (unless refresh)
         if rid in per_post_map and not REFRESH:
+            skipped += 1
+            continue
+
+        # Skip if present in SQLite
+        existing_comment = db.get_lemmy_comment_id(rid)
+        if existing_comment and not REFRESH:
             skipped += 1
             continue
 
@@ -404,8 +396,9 @@ def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment
         cid = post_lemmy_comment(jwt, lemmy_post_id, content, parent_lemmy_id)
         time.sleep(2)  # 🧩 Slow down comment posting to avoid Lemmy rate limits
         if cid:
-            per_post_map[rid] = cid
+            per_post_map[rid] = cid                       # keep legacy map in sync as backup
             temp_parent_map[rid] = cid
+            db.save_comment(rid, str(cid), parent_reddit_id(c), str(parent_lemmy_id) if parent_lemmy_id else None)
             mirrored += 1
             time.sleep(COMMENT_SLEEP)
         else:
@@ -422,6 +415,10 @@ def main():
 
     post_map = load_post_map()
     comment_map = load_comment_map()
+    db = DB()
+
+    # Migrate legacy comment_map into SQLite (one-time, JSON remains)
+    migrate_legacy_comments_to_sqlite(db, comment_map)
 
     if not post_map:
         print("🕒 Finished comment mirror (no posts mapped yet).")
@@ -435,9 +432,10 @@ def main():
             continue
 
         print(f"🧵 Mirroring comments for Reddit post {rp_id} → Lemmy post {lemmy_post_id} (refresh={REFRESH})")
-        m, s = mirror_comments_for_post(reddit, jwt, rp_id, lemmy_post_id, comment_map)
+        m, s = mirror_comments_for_post(reddit, jwt, rp_id, lemmy_post_id, comment_map, db)
         total_mirrored += m
         total_skipped += s
+        # Keep legacy JSON up to date as a backup only
         save_comment_map(comment_map)
 
     print(f"🧮 Comment mirror complete. Mirrored: {total_mirrored}, Skipped: {total_skipped}")
