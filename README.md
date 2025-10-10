@@ -1,188 +1,197 @@
-# 🪞 Reddit → Lemmy Bridge
+# 🌉 Reddit → Lemmy Bridge
+**Mirror Reddit posts and comments to Lemmy communities automatically**
 
-Mirror posts and comments from Reddit communities into Lemmy communities — automatically and continuously.  
-Designed for stability, rate-limit resilience, and easy container deployment.
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![Docker](https://img.shields.io/badge/docker-ready-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+---
+
+## 🧭 Overview
+The **Reddit → Lemmy Bridge** syncs new Reddit posts and their comment threads to corresponding Lemmy communities.
+
+Originally JSON-based, it now supports a **persistent SQLite backend**, offering durability, restart-safe caching, and faster duplicate detection.
 
 ---
 
 ## ✨ Features
-
-- 🔁 **Mirrors Reddit posts** to a matching Lemmy community  
-- 💬 **Mirrors Reddit comments** into their respective Lemmy threads  
-- 🧠 Caches JWT tokens and refreshes automatically  
-- 🕒 Respects Lemmy’s rate limits with exponential backoff  
-- 🐳 Dockerized for simple deployment  
-- 🔧 Configurable entirely through `.env`  
-- 💾 Tracks mirrored items via `post_map.json` and `comment_map.json`
-
----
-
-## 📦 Requirements
-
-- Docker and Docker Compose
-- A Lemmy instance (self-hosted or federated)
-- Two Lemmy bot accounts (recommended):
-  - One for posts (e.g. `mirrorbot`)
-  - One for comments (e.g. `mirrorcomments`)
-- Reddit API credentials (from [Reddit App Console](https://www.reddit.com/prefs/apps))
+- 🔄 **Automated Reddit → Lemmy post mirroring**
+- 💬 **Comment mirroring** with parent threading
+- 🔑 **JWT refresh** and rate-limit handling
+- 🗃️ **SQLite caching** for reliable, resumable syncs
+- 🐳 **Docker-ready**, clean `.env`-based configuration
+- 🧩 **Backwards compatible** with legacy `post_map.json` and `comment_map.json`
+- 🔍 Verbose structured logging with timestamps
+- 🧱 Modular design for extending to new platforms or dashboards
 
 ---
 
-## ⚙️ Setup
+## 🧰 Requirements
+- **Python 3.12+**
+- A **Lemmy account** with post/comment permissions
+- A **Reddit script app** (Client ID & Secret)
+- Docker (optional but recommended)
 
-### 1️⃣ Clone and enter the repository
+---
 
+## ⚙️ Installation
+
+### 🐳 Option 1: Docker Compose (Recommended)
 ```bash
-git clone https://github.com/YOURNAME/Reddit-Mirror-2-Lemmy.git
-cd Reddit-Mirror-2-Lemmy
-```
-
-### 2️⃣ Create your `.env` file
-
-Copy and edit the provided example:
-
-```bash
+git clone https://github.com/yourname/reddit-lemmy-bridge.git
+cd reddit-lemmy-bridge
 cp .env.example .env
-```
-
-Fill in your Reddit and Lemmy credentials inside `.env` (see below).
-
-### 3️⃣ Build and start the containers
-
-```bash
-docker compose build
+cp docker-compose.example.yml docker-compose.yml
+docker compose build --no-cache
 docker compose up -d
 ```
 
-This runs both bots:
-- `reddit-lemmy-bridge`: Handles posts  
-- `reddit-comment-mirror`: Handles comments
+**Persistent Data:**  
+The folder `./data` on your host maps to `/app/data` inside containers and stores:
+- `token.json` — JWTs and auth state
+- `bridge_cache.db` — SQLite cache (new in v1.1)
+- Legacy backups (`post_map.json`, `comment_map.json`)
 
-Logs can be followed with:
+---
 
+### 🧩 Option 2: Manual (Development Mode)
 ```bash
-docker compose logs -f
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+python3 auto_mirror.py
 ```
 
 ---
 
-## ⚙️ `.env` Configuration
+## 🔐 Environment Variables
+
+All configuration lives in `.env`.  
+See the example file: [`.env.example`](./.env.example)
 
 | Variable | Description |
 |-----------|--------------|
-| `REDDIT_CLIENT_ID` | Your Reddit app’s client ID |
-| `REDDIT_CLIENT_SECRET` | Your Reddit app’s client secret |
-| `REDDIT_USERNAME` | Reddit account username |
-| `REDDIT_PASSWORD` | Reddit account password |
-| `REDDIT_USER_AGENT` | User agent (e.g. `reddit-lemmy-bot/1.0`) |
-| `REDDIT_SUBREDDITS` | Comma-separated list of subreddits to mirror |
 | `LEMMY_URL` | Base URL of your Lemmy instance |
-| `LEMMY_USER` | Lemmy bot account for posts |
-| `LEMMY_PASS` | Password for post bot |
-| `LEMMY_USER_COMMENTS` | Lemmy account for comments |
-| `LEMMY_PASS_COMMENTS` | Password for comment bot |
-| `MIRROR_COMMUNITY` | Lemmy community to post to (e.g. `fosscad2`) |
-| `POLL_INTERVAL` | Seconds between Reddit checks |
-| `COMMENT_LIMIT` | Max comments per post mirrored |
-| `COMMENT_LIMIT_TOTAL` | Global comment mirror limit |
-| `COMMENT_SLEEP` | Delay between comment posts (seconds) |
+| `LEMMY_USER`, `LEMMY_PASS` | Lemmy account for posts |
+| `LEMMY_USER_COMMENTS`, `LEMMY_PASS_COMMENTS` | Secondary Lemmy account for comments (optional) |
+| `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` | Reddit API credentials |
+| `REDDIT_USER`, `REDDIT_PASS` | Reddit login for mirroring |
+| `REDDIT_SUBS` | Comma-separated list of subreddits to mirror |
+| `REDDIT_LIMIT` | Number of posts per cycle |
+| `DATA_DIR` | Path for runtime data (`/app/data` default) |
+| `SQLITE_DB_NAME` | Optional database filename override |
+| `SLEEP_BETWEEN_CYCLES` | Time between mirror runs (seconds) |
+| `LOG_LEVEL` | Logging verbosity (`DEBUG`, `INFO`, `WARN`) |
 
 ---
 
-## 🧩 Docker Compose Overview
+## 🐳 Docker Services
 
-Two coordinated services:
+| Service | Purpose |
+|----------|----------|
+| `reddit-lemmy-bridge` | Mirrors Reddit posts to Lemmy |
+| `reddit-comment-mirror` | Mirrors Reddit comments to Lemmy |
+| `reddit-edit-sync` | Handles Reddit edit synchronization |
+| `/app/data` | Persistent cache & tokens shared between containers |
 
-```yaml
-services:
-  reddit-lemmy-bridge:
-    build: .
-    container_name: reddit-lemmy-bridge
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./auto_mirror.py:/app/auto_mirror.py:ro
-      - ./data:/app/data
-    command: ["python", "-u", "auto_mirror.py"]
-
-  reddit-comment-mirror:
-    build: .
-    container_name: reddit-comment-mirror
-    restart: unless-stopped
-    env_file:
-      - .env
-    volumes:
-      - ./comment_mirror.py:/app/comment_mirror.py:ro
-      - ./data:/app/data
-    command: ["python", "-u", "comment_mirror.py"]
-```
-
-Both containers share a `/data` directory containing:
-- `post_map.json` — tracked Reddit→Lemmy post pairs  
-- `comment_map.json` — tracked Reddit→Lemmy comment pairs  
-- `token.json` — cached JWTs
+Each service reads `.env` and uses `DATA_DIR` for its local cache.
 
 ---
 
-## 🚀 Advanced Options
+## 🧱 Data Persistence
 
-### 🔁 Refresh existing posts
-If you update your formatting logic or add embeds:
+The bridge now stores mappings and cache data in SQLite:
 
-```bash
-docker exec -it reddit-lemmy-bridge python3 /app/auto_mirror.py --update-existing
-```
+**Database:** `/app/data/bridge_cache.db`  
+**Tables:**
+- `posts` — Reddit ↔ Lemmy post mappings  
+- `comments` — Reddit ↔ Lemmy comment mappings  
 
-### 🧱 Rate Limit Adjustments
-If you host Lemmy yourself, add to `lemmy.hjson`:
-
-```hjson
-trusted_users: ["mirrorbot", "mirrorcomments"]
-rate_limit: {
-  message: 100
-  message_per_second: 5
-  post: 50
-  post_per_second: 3
-}
-```
-
-Restart Lemmy after editing:
-```bash
-docker compose restart lemmy
-```
+Legacy files (`post_map.json`, `comment_map.json`) are still read once and migrated automatically on startup.  
+They remain untouched for rollback compatibility.
 
 ---
 
-## 🧠 Troubleshooting
+## 🔄 Upgrading from v1.0.0 → v1.1.0
 
-| Problem | Cause / Fix |
-|----------|--------------|
-| `rate_limit_error` | Reduce COMMENT_LIMIT or raise Lemmy limits |
-| `invalid_post_title` | Reddit post title too long → truncate in script |
-| `JWT appears invalid` | Normal — token auto-refreshes |
-| No comments mirrored | Ensure `comment_mirror.py` is running |
-| 404 on update | Lemmy post deleted or unlisted |
+> _This section summarizes the upgrade guide for existing users._
+
+1. **Pull latest release**  
+   ```bash
+   git pull origin main
+   ```
+
+2. **Add SQLite support**  
+   Update `Dockerfile` to Python 3.12 (see example in repo).
+
+3. **Add DATA_DIR**  
+   Add this to your `.env`:
+   ```dotenv
+   DATA_DIR=/app/data
+   ```
+
+4. **Rebuild containers**  
+   ```bash
+   docker compose build --no-cache
+   docker compose up -d
+   ```
+
+5. **Automatic migration**  
+   On first startup:
+   ```
+   📂 Found legacy post_map.json — migrating...
+   📦 Migration complete: imported=87, skipped=12
+   ```
+   Your old JSONs stay as backups.
+
+6. **Verify migration**  
+   ```bash
+   docker exec -it reddit-lemmy-bridge sqlite3 /app/data/bridge_cache.db ".tables"
+   ```
 
 ---
 
-## 🧭 Roadmap
+## 🧩 Troubleshooting
 
-See [ROADMAP.md](ROADMAP.md) for planned features, including:
-- Web dashboard for monitoring sync
-- Cross-instance Lemmy mirroring
-- Better media embedding
-
----
-
-## 🛠️ Contributing
-
-Pull requests welcome!  
-For bug reports or feature ideas, open an issue.
+| Issue | Fix |
+|--------|-----|
+| `401 {"error":"incorrect_login"}` | Check Lemmy credentials in `.env` |
+| `ModuleNotFoundError: No module named 'praw'` | Rebuild Docker image (installs all deps) |
+| `DeprecationWarning: datetime.utcnow()` | Safe to ignore; fixed in next patch |
+| SQLite file missing | Ensure `DATA_DIR` volume (`./data:/app/data`) is mounted properly |
+| Old JSON not migrating | Confirm JSON is in `/app/data` or relative to working dir |
 
 ---
 
-## 🧾 License
+## 🧪 Development Notes
+- Run directly with `python3 auto_mirror.py` for debugging.
+- Use `LOG_LEVEL=DEBUG` for verbose trace logs.
+- `db_cache.py` can be imported standalone for CLI inspection:
+  ```bash
+  python3 db_cache.py
+  ```
 
-MIT License © 2025 YourName  
-Contributions welcome under the same license.
+---
+
+## 🛠️ Roadmap
+
+| Milestone | Description | Status |
+|------------|--------------|---------|
+| v1.1.0 | SQLite cache, Docker modernization | ✅ Released |
+| v1.2.0 | Health monitor dashboard (Flask/FastAPI) | 🧩 In design |
+| v1.3.0 | Async job queue for per-subreddit mirroring | 🧠 Planned |
+| v1.4.0 | Web dashboard + metrics exporter | 🚧 Planned |
+
+---
+
+## 🤝 Contributing
+PRs welcome!  
+If you add new integrations or improve cache logic, please include tests or migration notes.  
+Run `black` and `flake8` before committing for style consistency.
+
+---
+
+## 📜 License
+MIT License © 2025 — Patrick Kelley  
+See [`LICENSE`](./LICENSE) for full terms.

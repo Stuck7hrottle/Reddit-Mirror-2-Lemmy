@@ -11,7 +11,7 @@ Each stage builds upon the previous one, focusing on long-term reliability, tran
   - Cached login tokens for persistent sessions  
   - Automatic refresh and rate-limit cooldown logic  
 - **Mapping Persistence**
-  - Persistent post and community mapping (`post_map.json`, `community_map.json`)  
+  - Persistent post and community mapping (originally `post_map.json`, now migrated to SQLite)  
   - Automatic refresh every 6 hours or on demand  
 - **Error Recovery**
   - Graceful token invalidation handling  
@@ -24,57 +24,70 @@ Each stage builds upon the previous one, focusing on long-term reliability, tran
 
 ---
 
-## ⚙️ Stage 2 — UX & Diagnostics *(In Progress)*
+## ⚙️ Stage 2 — UX, Diagnostics & Persistence *(Completed / In Progress)*
 
+- **SQLite Backend Cache**
+  - Replaces JSON maps for posts/comments with `bridge_cache.db`  
+  - Automatic migration from legacy JSON files on startup  
+  - Enables duplicate-prevention and resumable sync after restart  
 - **Advanced Logging**
-  - Optional `DEBUG_MODE=true` for detailed request/response tracing  
-  - Structured JSON logs for easier parsing and external analysis  
+  - Structured, timestamped logs with per-cycle summaries  
+  - Optional verbose mode via `LOG_LEVEL=DEBUG`  
 - **Diagnostics**
-  - `/health` endpoint for container status monitoring  
-  - Log summary per mirror cycle (posts created, comments mirrored, skipped, errors)  
-- **Enhanced Formatting**
-  - Embed Reddit permalinks and media previews in Lemmy posts  
-  - Preserve markdown and formatting consistency  
+  - Planned `/status` and `/health` endpoints for live container monitoring  
+  - Integration hooks for lightweight dashboards (Stage 3)  
+- **Improved Docker Integration**
+  - Updated to Python 3.12 base image  
+  - Uses `/app/data` for persistent runtime state and caching  
+  - Non-root container execution for improved security  
 
 ---
 
-## 🌐 Stage 3 — Federation Awareness *(Planned)*
+## 🌐 Stage 3 — Health Dashboard & Queue System *(In Design)*
+
+- **Web Dashboard**
+  - Lightweight Flask/FastAPI interface for health, stats, and manual actions  
+  - Displays:
+    - Total mirrored posts/comments  
+    - Lemmy rate-limit state  
+    - JWT expiration countdown  
+    - Queue backlog and errors  
+- **Queue System**
+  - Local retry queue for failed or deferred posts/comments  
+  - Optional exponential backoff retry logic  
+- **Metrics Export**
+  - JSON or Prometheus-compatible `/metrics` endpoint for external monitoring  
+
+---
+
+## 📦 Stage 4 — Federation Awareness & Automation *(Planned)*
 
 - **Remote Community Support**
-  - Recognize and post to federated communities using `!community@domain` syntax  
-  - Handle federation propagation delays gracefully  
-- **Queue System**
-  - Queue failed or rate-limited posts for retry  
-  - Optionally backoff exponential retry schedule  
-- **Cross-Linking**
-  - (Optional) Post mirrored Lemmy URLs back to Reddit as crosslinks  
-
----
-
-## 📦 Stage 4 — Automation & Maintenance *(Planned)*
-
-- **Environment Self-Check**
-  - Warn on missing `.env` variables or bad credentials  
+  - Recognize and post to federated communities via `!community@domain`  
+  - Handle propagation delays gracefully  
 - **Scheduled Tasks**
-  - Automatic map refresh (community/post) every 6 hours  
-  - Periodic cleanup of stale data entries  
+  - Built-in job scheduling for periodic refresh and cleanup  
 - **Maintenance CLI**
   - Add standalone management commands:
-    - `--clean-data` → clear mirror cache safely  
-    - `--refresh-map` → force immediate map rebuild  
-    - `--rebuild-tokens` → discard and renew JWTs  
+    - `--clean-db` → clear or vacuum SQLite safely  
+    - `--refresh-map` → rebuild community mappings  
+    - `--rebuild-tokens` → force JWT renewal  
+- **Federation Logging**
+  - Track posts routed through remote instances with detailed metrics  
 
 ---
 
 ## 🧠 Stage 5 — Smart Syncing & Analytics *(Future Goals)*
 
-- **Metrics**
-  - Track mirrored posts, failed attempts, retry counts, and duration per cycle  
-  - Export metrics to Prometheus or Grafana  
 - **Performance**
-  - Optimize API request concurrency and adaptive backoff logic  
-- **Dashboard**
-  - Optional web dashboard for monitoring bridges, logs, and mapping status  
+  - Optimize multi-threaded or asyncio-based mirroring  
+  - Adaptive pacing based on Lemmy instance load  
+- **Analytics**
+  - Track mirrored posts, errors, latency, and retries per cycle  
+  - Export to Prometheus or Grafana for visualization  
+- **Self-Healing**
+  - Detect and retry broken states automatically  
+  - Optional alerting via webhook or email  
 
 ---
 
@@ -83,8 +96,9 @@ Each stage builds upon the previous one, focusing on long-term reliability, tran
 To evolve the Reddit–Lemmy Bridge into a fully autonomous synchronization service that:
 - Self-heals after errors or restarts  
 - Adapts to rate limits dynamically  
-- Provides clear operational transparency  
-- Serves as a general-purpose Lemmy integration template  
+- Provides live operational transparency  
+- Offers optional UI/metrics layers  
+- Serves as a general-purpose Lemmy integration framework  
 
 ---
 

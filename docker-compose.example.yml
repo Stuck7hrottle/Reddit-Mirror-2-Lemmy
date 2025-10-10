@@ -1,5 +1,8 @@
-# Reddit → Lemmy Bridge
-# Example docker-compose.yml (generic, network-neutral)
+# Reddit → Lemmy Bridge (Example Compose File)
+# Compatible with Python 3.12 and Lemmy-Ansible setups
+# 
+# This example is safe to publish in GitHub and shows sane defaults
+# for local or containerized deployments.
 
 services:
   reddit-lemmy-bridge:
@@ -10,12 +13,18 @@ services:
       - .env
     working_dir: /app
     volumes:
+      # Mirror main bridge script (read-only for safety)
       - ./auto_mirror.py:/app/auto_mirror.py:ro
+      # Persistent data: tokens, SQLite cache, maps
       - ./data:/app/data
-    command: ["python", "-u", "auto_mirror.py"]
+    environment:
+      - DATA_DIR=/app/data
+      - PYTHONUNBUFFERED=1
+    command: ["python3", "-u", "auto_mirror.py"]
     networks:
       - lemmy_net
     hostname: reddit-lemmy-bridge
+    user: "1000:1000"
 
   reddit-comment-mirror:
     container_name: reddit-comment-mirror
@@ -27,11 +36,20 @@ services:
     volumes:
       - ./comment_mirror.py:/app/comment_mirror.py:ro
       - ./data:/app/data
-    # Use --refresh to fill missing comments
-    command: ["python", "-u", "comment_mirror.py"]
+    environment:
+      - DATA_DIR=/app/data
+      - PYTHONUNBUFFERED=1
+    # Example: separate Lemmy account for comment posting
+    command: >
+      bash -c "
+        export LEMMY_USER=$${LEMMY_USER_COMMENTS} &&
+        export LEMMY_PASS=$${LEMMY_PASS_COMMENTS} &&
+        python3 -u comment_mirror.py
+      "
     networks:
       - lemmy_net
     hostname: reddit-comment-mirror
+    user: "1000:1000"
 
   reddit-edit-sync:
     container_name: reddit-edit-sync
@@ -43,13 +61,18 @@ services:
     volumes:
       - ./edit_sync.py:/app/edit_sync.py:ro
       - ./data:/app/data
-    command: ["python", "-u", "edit_sync.py"]
+    environment:
+      - DATA_DIR=/app/data
+      - PYTHONUNBUFFERED=1
+    command: ["python3", "-u", "edit_sync.py"]
     networks:
       - lemmy_net
     hostname: reddit-edit-sync
+    user: "1000:1000"
 
+# External Lemmy network
 networks:
   lemmy_net:
     external: true
-    # Replace with your Lemmy-Ansible network name (run: docker network ls | grep lemmy)
-    name: <your_lemmy_network_name>_default
+    # Replace with your Lemmy-Ansible network name (check with `docker network ls | grep lemmy`)
+    name: fosscadguncaddesignscom_default
