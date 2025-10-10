@@ -1,108 +1,188 @@
-# Reddit → Lemmy Bridge
+# 🪞 Reddit → Lemmy Bridge
 
-Mirror new posts (and comments) from one or more subreddits to matching Lemmy communities.
-Works with Docker Compose and Lemmy-Ansible deployments.
+Mirror posts and comments from Reddit communities into Lemmy communities — automatically and continuously.  
+Designed for stability, rate-limit resilience, and easy container deployment.
 
-## Features
-- ✅ **TEST_MODE toggle** (`TEST_MODE=true`) to run without hitting Reddit
-- 🔐 Lemmy **token caching** with cautious re-login
-- 🗺️ **Community map** auto-refresh every 6 hours and stored on disk
-- 💬 **Comment mirroring** with adaptive rate-limit backoff
-- 🧩 Multiple subreddit→community mappings via `SUB_MAP`
-- 📝 Text posts embed the **Reddit permalink** and (for link posts) the **media URL**
+---
 
-## Quick Start
+## ✨ Features
 
-1. **Clone your repo** and copy these files:
-   - `auto_mirror.py`
-   - `Dockerfile` (see below)
-   - `docker-compose.yml` (see below)
-   - `.env` (see example block)
+- 🔁 **Mirrors Reddit posts** to a matching Lemmy community  
+- 💬 **Mirrors Reddit comments** into their respective Lemmy threads  
+- 🧠 Caches JWT tokens and refreshes automatically  
+- 🕒 Respects Lemmy’s rate limits with exponential backoff  
+- 🐳 Dockerized for simple deployment  
+- 🔧 Configurable entirely through `.env`  
+- 💾 Tracks mirrored items via `post_map.json` and `comment_map.json`
 
-2. **Create `.env`** (example):
-   ```env
-   # Lemmy
-   LEMMY_URL=https://your-lemmy.example.com
-   LEMMY_USER=mirrorbot
-   LEMMY_PASS=changeme
+---
 
-   # Mapping: subreddit:community (comma-separated)
-   SUB_MAP=fosscad2:fosscad2,3d2a:3D2A,FOSSCADtoo:FOSSCADtoo
+## 📦 Requirements
 
-   # Reddit API (live mode only)
-   REDDIT_CLIENT_ID=xxxx
-   REDDIT_CLIENT_SECRET=xxxx
-   REDDIT_USERNAME=xxxx
-   REDDIT_PASSWORD=xxxx
-   REDDIT_USER_AGENT=reddit-lemmy-bridge/1.0
+- Docker and Docker Compose
+- A Lemmy instance (self-hosted or federated)
+- Two Lemmy bot accounts (recommended):
+  - One for posts (e.g. `mirrorbot`)
+  - One for comments (e.g. `mirrorcomments`)
+- Reddit API credentials (from [Reddit App Console](https://www.reddit.com/prefs/apps))
 
-   # Options
-   DATA_DIR=/app/data
-   REDDIT_LIMIT=10
-   MAX_POSTS_PER_RUN=5
-   MIRROR_COMMENTS=true
-   COMMENT_LIMIT_TOTAL=500
-   SLEEP_SECONDS=900
+---
 
-   # Testing
-   TEST_MODE=false
-   ```
+## ⚙️ Setup
 
-3. **Dockerfile** (example):
-   ```dockerfile
-   FROM python:3.11-slim
-   WORKDIR /app
-   COPY . /app
-   RUN pip install --no-cache-dir praw requests python-dotenv
-   ENV PYTHONUNBUFFERED=1
-   CMD ["python", "-u", "auto_mirror.py"]
-   ```
+### 1️⃣ Clone and enter the repository
 
-4. **docker-compose.yml** (example):
-   ```yaml
-   services:
-     reddit-lemmy-bridge:
-       container_name: reddit-lemmy-bridge
-       build: .
-       restart: unless-stopped
-       env_file: .env
-       volumes:
-         - .:/app
-       # If your Lemmy is on another compose project, attach to its network:
-       # networks:
-       #   - lemmy_net
+```bash
+git clone https://github.com/YOURNAME/Reddit-Mirror-2-Lemmy.git
+cd Reddit-Mirror-2-Lemmy
+```
 
-   # networks:
-   #   lemmy_net:
-   #     external: true
-   #     name: your_lemmy_compose_default
-   ```
+### 2️⃣ Create your `.env` file
 
-5. **Run**
-   ```bash
-   docker compose up -d --build reddit-lemmy-bridge
-   docker compose logs -f reddit-lemmy-bridge
-   ```
+Copy and edit the provided example:
 
-## Test Mode
-Set `TEST_MODE=true` in `.env` to avoid calling Reddit. The bridge will post
-a single deterministic test item to each mapped community so you can verify
-login, community resolution, and posting flow without credentials.
+```bash
+cp .env.example .env
+```
 
-## Rate Limits
-Comment posting uses adaptive backoff. If Lemmy returns a rate-limit error,
-the bridge sleeps a few seconds and retries with a gradually increasing delay.
+Fill in your Reddit and Lemmy credentials inside `.env` (see below).
 
-## Community Map
-The bridge fetches `/api/v3/community/list` and persists a lowercase name→id
-map to `DATA_DIR/community_map.json`. It auto-refreshes every 6 hours or on demand
-if the file is missing/corrupt.
+### 3️⃣ Build and start the containers
 
-## Notes
-- `SUB_MAP` parsing is strict: each entry must be `subreddit:community`.
-- For link posts, the bridge prefers a **text post** with the media URL embedded,
-  to preserve context and formatting.
-- Token caching lives in `DATA_DIR/token.json`. The bridge only re-logins when it
-  encounters a 401 or needs to rotate.
+```bash
+docker compose build
+docker compose up -d
+```
 
-See `maintenance.md` for admin tasks.
+This runs both bots:
+- `reddit-lemmy-bridge`: Handles posts  
+- `reddit-comment-mirror`: Handles comments
+
+Logs can be followed with:
+
+```bash
+docker compose logs -f
+```
+
+---
+
+## ⚙️ `.env` Configuration
+
+| Variable | Description |
+|-----------|--------------|
+| `REDDIT_CLIENT_ID` | Your Reddit app’s client ID |
+| `REDDIT_CLIENT_SECRET` | Your Reddit app’s client secret |
+| `REDDIT_USERNAME` | Reddit account username |
+| `REDDIT_PASSWORD` | Reddit account password |
+| `REDDIT_USER_AGENT` | User agent (e.g. `reddit-lemmy-bot/1.0`) |
+| `REDDIT_SUBREDDITS` | Comma-separated list of subreddits to mirror |
+| `LEMMY_URL` | Base URL of your Lemmy instance |
+| `LEMMY_USER` | Lemmy bot account for posts |
+| `LEMMY_PASS` | Password for post bot |
+| `LEMMY_USER_COMMENTS` | Lemmy account for comments |
+| `LEMMY_PASS_COMMENTS` | Password for comment bot |
+| `MIRROR_COMMUNITY` | Lemmy community to post to (e.g. `fosscad2`) |
+| `POLL_INTERVAL` | Seconds between Reddit checks |
+| `COMMENT_LIMIT` | Max comments per post mirrored |
+| `COMMENT_LIMIT_TOTAL` | Global comment mirror limit |
+| `COMMENT_SLEEP` | Delay between comment posts (seconds) |
+
+---
+
+## 🧩 Docker Compose Overview
+
+Two coordinated services:
+
+```yaml
+services:
+  reddit-lemmy-bridge:
+    build: .
+    container_name: reddit-lemmy-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./auto_mirror.py:/app/auto_mirror.py:ro
+      - ./data:/app/data
+    command: ["python", "-u", "auto_mirror.py"]
+
+  reddit-comment-mirror:
+    build: .
+    container_name: reddit-comment-mirror
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./comment_mirror.py:/app/comment_mirror.py:ro
+      - ./data:/app/data
+    command: ["python", "-u", "comment_mirror.py"]
+```
+
+Both containers share a `/data` directory containing:
+- `post_map.json` — tracked Reddit→Lemmy post pairs  
+- `comment_map.json` — tracked Reddit→Lemmy comment pairs  
+- `token.json` — cached JWTs
+
+---
+
+## 🚀 Advanced Options
+
+### 🔁 Refresh existing posts
+If you update your formatting logic or add embeds:
+
+```bash
+docker exec -it reddit-lemmy-bridge python3 /app/auto_mirror.py --update-existing
+```
+
+### 🧱 Rate Limit Adjustments
+If you host Lemmy yourself, add to `lemmy.hjson`:
+
+```hjson
+trusted_users: ["mirrorbot", "mirrorcomments"]
+rate_limit: {
+  message: 100
+  message_per_second: 5
+  post: 50
+  post_per_second: 3
+}
+```
+
+Restart Lemmy after editing:
+```bash
+docker compose restart lemmy
+```
+
+---
+
+## 🧠 Troubleshooting
+
+| Problem | Cause / Fix |
+|----------|--------------|
+| `rate_limit_error` | Reduce COMMENT_LIMIT or raise Lemmy limits |
+| `invalid_post_title` | Reddit post title too long → truncate in script |
+| `JWT appears invalid` | Normal — token auto-refreshes |
+| No comments mirrored | Ensure `comment_mirror.py` is running |
+| 404 on update | Lemmy post deleted or unlisted |
+
+---
+
+## 🧭 Roadmap
+
+See [ROADMAP.md](ROADMAP.md) for planned features, including:
+- Web dashboard for monitoring sync
+- Cross-instance Lemmy mirroring
+- Better media embedding
+
+---
+
+## 🛠️ Contributing
+
+Pull requests welcome!  
+For bug reports or feature ideas, open an issue.
+
+---
+
+## 🧾 License
+
+MIT License © 2025 YourName  
+Contributions welcome under the same license.
