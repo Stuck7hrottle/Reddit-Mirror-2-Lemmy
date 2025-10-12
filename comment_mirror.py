@@ -407,6 +407,7 @@ def migrate_legacy_comments_to_sqlite(db: DB, legacy_map: Dict[str, Dict[str, in
     print(f"📦 Comment migration complete: imported={imported}, skipped(existing)={skipped} (JSON kept as backup).")
 
 def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment_map, db: DB):
+    """Queue comment mirror jobs for a given Reddit post."""
     per_post_map = comment_map.setdefault(reddit_post_id, {})
     existing_lemmy_sig = get_existing_lemmy_comments(lemmy_post_id) if REFRESH else {}
 
@@ -430,12 +431,11 @@ def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment
             continue
         total_processed += 1
 
-        # Skip if present in legacy JSON (unless refresh)
+        # Skip if already mirrored
         if rid in per_post_map and not REFRESH:
             skipped += 1
             continue
 
-        # Skip if present in SQLite
         existing_comment = db.get_lemmy_comment_id(rid)
         if existing_comment and not REFRESH:
             skipped += 1
@@ -448,18 +448,21 @@ def mirror_comments_for_post(reddit, jwt, reddit_post_id, lemmy_post_id, comment
             skipped += 1
             continue
 
-        parent_lemmy_id = temp_parent_map.get(parent_reddit_id(c))
-        cid = post_lemmy_comment(jwt, lemmy_post_id, content, parent_lemmy_id)
-        time.sleep(2)  # 🧩 Slow down comment posting to avoid Lemmy rate limits
-        if cid:
-            per_post_map[rid] = cid                       # keep legacy map in sync as backup
-            temp_parent_map[rid] = cid
-            db.save_comment(rid, str(cid), parent_reddit_id(c), str(parent_lemmy_id) if parent_lemmy_id else None)
-            mirrored += 1
-            time.sleep(COMMENT_SLEEP)
-        else:
-            print(f"⚠️ Failed to mirror comment {rid} on post {reddit_post_id}")
+        # ✅ Proper structured enqueue
+        from job_queue import enqueue_job
+        import asyncio
 
+        payload = {
+            "reddit_id": reddit_post_id,
+            "lemmy_post_id": lemmy_post_id,
+            "reddit_comment_id": rid,
+        }
+
+        asyncio.run(enqueue_job("mirror_comment", payload))
+        print(f"💬 Enqueued background job for comment {rid} (post {reddit_post_id} → Lemmy {lemmy_post_id})")
+        mirrored += 1
+
+    print(f"🧮 Done queuing comments for {reddit_post_id}: mirrored={mirrored}, skipped={skipped}")
     return mirrored, skipped
 
 # --------------------------
@@ -496,5 +499,82 @@ def main():
 
     print(f"🧮 Comment mirror complete. Mirrored: {total_mirrored}, Skipped: {total_skipped}")
 
+# --------------------------
+# Background Worker-compatible version
+# --------------------------
+import asyncio
+
+async def mirror_comment_to_lemmy(payload: dict) -> dict:
+    """
+    Mirrors *all* Reddit comments for a given post to its Lemmy counterpart.
+    Example payload: {"reddit_id": "1o2ubp2", "lemmy_post_id": 515}
+    """
+    reddit_post_id = payload.get("reddit_id")
+    lemmy_post_id = payload.get("lemmy_post_id")
+
+    # Normalize Lemmy ID
+    if isinstance(lemmy_post_id, str) and lemmy_post_id.isdigit():
+        lemmy_post_id = int(lemmy_post_id)
+
+    if not reddit_post_id or not lemmy_post_id:
+        raise ValueError("Payload must include reddit_id and lemmy_post_id")
+
+    from job_queue import JobDB
+    db = JobDB()
+
+    reddit = reddit_client()
+    jwt = get_or_refresh_jwt()
+
+    print(f"💬 Mirroring comments for Reddit post {reddit_post_id} → Lemmy post {lemmy_post_id}")
+
+    submission = reddit.submission(id=reddit_post_id)
+    submission.comments.replace_more(limit=None)
+
+    mirrored = 0
+    skipped = 0
+
+    for c in submission.comments.list():
+        reddit_comment_id = getattr(c, "id", None)
+        if not reddit_comment_id:
+            continue
+
+        # ✅ Step 1: Skip if this comment already exists
+        if db.get_lemmy_comment_id(reddit_comment_id):
+            skipped += 1
+            print(f"⏭️ Skipping duplicate comment {reddit_comment_id}")
+            continue
+
+        # ✅ Step 2: Compose comment content
+        content = compose_comment_body(c)
+        parent_id = getattr(c, "parent_id", None)
+        parent_lemmy_id = None
+        if parent_id and parent_id.startswith("t1_"):
+            parent_lemmy_id = db.get_lemmy_comment_id(parent_id[3:])
+
+        # ✅ Step 3: Post to Lemmy
+        lemmy_comment_id = post_lemmy_comment(jwt, int(lemmy_post_id), content, parent_lemmy_id)
+
+        if lemmy_comment_id:
+            # ✅ Step 4: Record new mapping to DB
+            db.save_comment(
+                reddit_comment_id,
+                str(lemmy_comment_id),
+                parent_id[3:] if parent_id and parent_id.startswith("t1_") else None,
+                str(parent_lemmy_id) if parent_lemmy_id else None,
+            )
+            print(f"✅ Mirrored Reddit comment {reddit_comment_id} → Lemmy {lemmy_comment_id}")
+            mirrored += 1
+        else:
+            print(f"⚠️ Failed to mirror comment {reddit_comment_id}")
+
+        # Throttle to be Reddit-API friendly
+        await asyncio.sleep(COMMENT_SLEEP)
+
+    print(f"✅ Completed comment mirror for Reddit post {reddit_post_id}: {mirrored} new, {skipped} skipped.")
+    return {"mirrored": mirrored, "skipped": skipped}
+
+# --------------------------
+# Manual test mode (standalone)
+# --------------------------
 if __name__ == "__main__":
     main()

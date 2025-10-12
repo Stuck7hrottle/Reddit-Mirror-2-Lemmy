@@ -1,3 +1,6 @@
 requests
-praw
+praw>=7.7.1
 python-dotenv
+markdownify
+aiohttp
+rich

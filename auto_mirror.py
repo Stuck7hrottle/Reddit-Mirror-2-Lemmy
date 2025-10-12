@@ -21,8 +21,13 @@ from datetime import datetime, timedelta
 import sys
 import re
 from html import unescape
+from job_queue import JobDB
+from db_cache import DB
+from comment_mirror import mirror_comment_to_lemmy
+import asyncio
+import logging
 
-from db_cache import DB  # ← NEW
+logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────
 # ENV CONFIG
@@ -48,7 +53,7 @@ raw_sub_map = os.getenv("SUB_MAP", "fosscad2:fosscad2,3d2a:3D2A,FOSSCADtoo:FOSSC
 for pair in raw_sub_map.split(","):
     if ":" in pair:
         k, v = pair.split(":", 1)
-        SUB_MAP[k.strip()] = v.strip()
+        SUB_MAP[k.strip().lower()] = v.strip().lower()
 
 TOKEN_FILE = DATA_DIR / "token.json"
 COMMUNITY_MAP_FILE = DATA_DIR / "community_map.json"
@@ -61,7 +66,8 @@ SLEEP_BETWEEN_CYCLES = 900  # 15 min between full cycles
 token_state = {}
 
 def log(msg: str):
-    print(f"{datetime.utcnow().isoformat()} | {msg}", flush=True)
+    from datetime import datetime, timezone
+    print(f"{datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
 
 # ─────────────────────────────────────────────
 # LEGACY POST MAP (for one-time migration)
@@ -117,12 +123,30 @@ def lemmy_login(force=False):
             return token_state["jwt"]
 
     # 2️⃣ Otherwise login fresh
-    log(f"🔑 Logging in to {LEMMY_URL}/api/v3/user/login as {LEMMY_USER}")
+    log(f"🔑 Attempting fresh login to {LEMMY_URL} as {LEMMY_USER}")
+
+    # if another process just refreshed it within 60s, reuse it
+    if TOKEN_FILE.exists():
+        age = time.time() - TOKEN_FILE.stat().st_mtime
+        if age < 60:
+            try:
+                data = json.load(open(TOKEN_FILE))
+                if data.get("jwt"):
+                    log(f"♻️ Using recently refreshed token (age={int(age)}s)")
+                    token_state.update(data)
+                    return data["jwt"]
+            except Exception:
+                pass
+
     r = requests.post(
         f"{LEMMY_URL}/api/v3/user/login",
         json={"username_or_email": LEMMY_USER, "password": LEMMY_PASS},
         timeout=20,
     )
+    if r.status_code == 400 and "rate_limit" in r.text:
+        log("⏳ Lemmy rate-limited login — waiting 30s before retry...")
+        time.sleep(30)
+        return lemmy_login(force=True)
     if not r.ok:
         raise RuntimeError(f"Lemmy login failed: {r.status_code} {r.text[:300]}")
 
@@ -325,7 +349,7 @@ def mirror_comments(sub, post_id, comments, jwt):
         if not content:
             continue
 
-        payload = {"content": content, "post_id": post_id}
+        payload = {"content": content, "post_id": int(post_id)}
         try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
             if r.status_code == 401:
@@ -463,106 +487,133 @@ def migrate_legacy_json_to_sqlite(db: DB):
 
     log(f"📦 Migration complete: imported={imported}, skipped(existing)={skipped} (JSON kept as backup).")
 
-def mirror_once(db: DB):
-    jwt = get_valid_token()
+def mirror_once(subreddit_name: str, community_name: str, reddit, jwt: str, db: JobDB, test_mode: bool = False):
+    """Mirror latest Reddit posts and comments to Lemmy."""
+    print(f"🔍 Checking r/{subreddit_name} → c/{community_name} @ {datetime.utcnow()}")
 
-    for reddit_sub, lemmy_comm in SUB_MAP.items():
-        log(f"🔍 Checking r/{reddit_sub} → c/{lemmy_comm} @ {datetime.utcnow()}")
+    # Fetch posts from Reddit
+    print("🔄 Live mode: Fetching from Reddit API (limit=10)…")
+    submissions = reddit.subreddit(subreddit_name).new(limit=10)
 
-        try:
-            comm_id = get_community_id(lemmy_comm, jwt)
-        except Exception as e:
-            log(f"❌ Skipping {reddit_sub}: {e}")
-            continue
+    for submission in submissions:
+        reddit_post_id = submission.id
+        title = submission.title
+        print(f"🪶 Found Reddit post {reddit_post_id}: {title}")
 
-        if TEST_MODE:
-            log("🧪 TEST_MODE active — posting sample content instead of real Reddit posts.")
-            mock_post = {
-                "title": "Example mirrored post",
-                "url": f"https://reddit.com/r/{reddit_sub}/test",
-                "permalink": f"/r/{reddit_sub}/comments/test",
-                "selftext": "✅ Test successful: Reddit → Lemmy bridge is connected."
-            }
-            try:
-                pid = create_lemmy_post(reddit_sub, mock_post, jwt, comm_id)
-            except Exception as e:
-                log(f"⚠️ Error creating test post: {e}")
+        # STEP 1: Check if post mirror job already exists
+        cur = db.conn.execute(
+            "SELECT id FROM jobs WHERE type='mirror_post' AND json_extract(payload, '$.reddit_post_id') = ?",
+            (reddit_post_id,),
+        )
+        existing_post_job = cur.fetchone()
+        if not existing_post_job:
+            if test_mode:
+                print(f"🧪 [TEST MODE] Would enqueue mirror_post for Reddit {reddit_post_id}")
+            else:
+                print(f"🪶 Enqueuing mirror_post job for Reddit {reddit_post_id}")
+                db.enqueue(
+                    "mirror_post",
+                    {
+                        "reddit_post_id": reddit_post_id,
+                        "community_name": community_name,
+                    },
+                )
         else:
-            log(f"🔄 Live mode: Fetching from Reddit API (limit={os.getenv('REDDIT_LIMIT', 10)})…")
-            import praw
-            reddit = praw.Reddit(
-                client_id=os.getenv("REDDIT_CLIENT_ID"),
-                client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-                user_agent="reddit-lemmy-bridge",
-            )
-            subreddit_obj = reddit.subreddit(reddit_sub)
-            for submission in subreddit_obj.new(limit=int(os.getenv("REDDIT_LIMIT", 10))):
-                if db.get_lemmy_post_id(submission.id):
-                    log(f"⏭️ Skipping already mirrored post (cached): {submission.title}")
-                    continue
+            print(f"⏭️ mirror_post job already exists for Reddit {reddit_post_id}")
 
-                post_data = {
-                    "title": submission.title,
-                    "url": submission.url,
-                    "permalink": submission.permalink,
-                    "selftext": submission.selftext,
-                }
-                try:
-                    pid = create_lemmy_post(reddit_sub, post_data, jwt, comm_id)
-                    if pid:
-                        # Optional: mirror a few top-level comments (unchanged behavior)
-                        try:
-                            mirror_comments(reddit_sub, pid, submission.comments[:3], jwt)
-                        except Exception as e:
-                            log(f"⚠️ Comment mirroring error (non-fatal): {e}")
+    print("🕒 Sleeping 900s...")
 
-                        # Save to SQLite cache
-                        db.save_post(submission.id, str(pid), reddit_sub)
-                        log(f"💾 Cached mapping: Reddit {submission.id} → Lemmy {pid}")
-                except Exception as e:
-                    log(f"⚠️ Error creating post from Reddit: {e}")
+def mirror_loop(db: JobDB):
+    """Continuously mirror Reddit posts/comments to Lemmy communities."""
+    import praw
 
-    log(f"🕒 Sleeping {SLEEP_BETWEEN_CYCLES}s...")
+    jwt = get_valid_token()
+    reddit = praw.Reddit(
+        client_id=os.getenv("REDDIT_CLIENT_ID"),
+        client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
+        user_agent="reddit-lemmy-bridge",
+    )
+
+    while True:
+        log("🔁 Running refresh cycle...")
+        for reddit_sub, lemmy_comm in SUB_MAP.items():
+            try:
+                mirror_once(
+                    subreddit_name=reddit_sub,
+                    community_name=lemmy_comm,
+                    reddit=reddit,
+                    jwt=jwt,
+                    db=db,
+                    test_mode=TEST_MODE,
+                )
+            except Exception as e:
+                log(f"⚠️ Error while mirroring r/{reddit_sub} → c/{lemmy_comm}: {e}")
+
+        log(f"🕒 Sleeping {SLEEP_BETWEEN_CYCLES}s...")
+        time.sleep(SLEEP_BETWEEN_CYCLES)
 
 # ─────────────────────────────────────────────
 # UPDATE EXISTING POSTS (unchanged)
 # ─────────────────────────────────────────────
-def fetch_reddit_submission(submission_id):
+def fetch_reddit_submission(submission_id: str):
+    """
+    Fetches a single Reddit submission's JSON data safely with rate limit handling.
+    Supports both authenticated (via Reddit API keys) and unauthenticated modes.
+    """
+
+    import os
+    import time
     import requests
-    user_agent = os.getenv("REDDIT_USER_AGENT", "reddit-lemmy-bridge-updater/1.0")
-    base_url = f"https://www.reddit.com/comments/{submission_id}.json"
+
+    client_id = os.getenv("REDDIT_CLIENT_ID")
+    client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+    user_agent = "RedditToLemmyBridge/1.1.0 (by u/YourBotName)"
+
+    base_url = f"https://www.reddit.com/by_id/t3_{submission_id}.json"
     headers = {"User-Agent": user_agent}
-    try:
+
+    # 🔐 Prefer Reddit OAuth API if credentials exist
+    if client_id and client_secret:
+        token_url = "https://www.reddit.com/api/v1/access_token"
+        auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
+        data = {"grant_type": "client_credentials"}
+        token_res = requests.post(token_url, auth=auth, data=data, headers=headers, timeout=15)
+
+        if token_res.ok:
+            token = token_res.json().get("access_token")
+            headers["Authorization"] = f"bearer {token}"
+            base_url = f"https://oauth.reddit.com/by_id/t3_{submission_id}.json"
+        else:
+            print("⚠️ Failed to get Reddit OAuth token, falling back to public mode.")
+
+    # 🚦 Fetch submission with retry & cooldown
+    for attempt in range(3):
         r = requests.get(base_url, headers=headers, timeout=15)
+        if r.status_code == 429:
+            print(f"⏳ Reddit rate limited (429) — sleeping 5s (attempt {attempt + 1}/3)...")
+            time.sleep(5 * (attempt + 1))
+            continue  # retry
         if not r.ok:
-            log(f"⚠️ Reddit fetch failed for {submission_id}: {r.status_code}")
+            print(f"⚠️ Reddit fetch failed for {submission_id}: {r.status_code}")
             return None
+
+        # ✅ Success
+        break
+
+    # 🌙 Gentle delay between requests to avoid hammering the API
+    time.sleep(2)
+
+    try:
         data = r.json()
-        if not data or not isinstance(data, list):
-            log(f"⚠️ Unexpected Reddit JSON for {submission_id}")
-            return None
-        post = data[0]["data"]["children"][0]["data"]
-        sub_data = {
-            "id": post.get("id"),
-            "title": post.get("title", ""),
-            "url": post.get("url_overridden_by_dest") or post.get("url"),
-            "selftext": post.get("selftext", ""),
-            "subreddit": post.get("subreddit", ""),
-            "permalink": f"https://www.reddit.com{post.get('permalink', '')}",
-            "is_self": post.get("is_self", False),
-            "domain": post.get("domain", ""),
-            "thumbnail": post.get("thumbnail") if post.get("thumbnail", "").startswith("http") else "",
-            "is_gallery": post.get("is_gallery", False),
-            "media_metadata": post.get("media_metadata", {}),
-        }
-        if post.get("is_video") and "media" in post:
-            video_info = post["media"].get("reddit_video", {})
-            sub_data["video_url"] = video_info.get("fallback_url")
-            sub_data["is_video"] = True
-        return sub_data
     except Exception as e:
-        log(f"⚠️ Failed fetching Reddit post {submission_id}: {e}")
+        print(f"⚠️ Failed to parse Reddit JSON for {submission_id}: {e}")
         return None
+
+    if not data.get("data") or not data["data"].get("children"):
+        print(f"⚠️ No Reddit data returned for {submission_id}")
+        return None
+
+    return data["data"]["children"][0]["data"]
 
 def update_existing_posts():
     post_map_path = DATA_DIR / "post_map.json"
@@ -634,16 +685,102 @@ if len(sys.argv) > 1 and sys.argv[1] == "--update-existing":
     update_existing_posts()
     sys.exit(0)
 
+async def mirror_post_to_lemmy(payload: dict):
+
+    """
+    Background-safe synchronous function.
+    Accepts {'reddit_id': 't3_abc123'} and mirrors that post to Lemmy.
+    Returns {'lemmy_id': int}.
+    """
+
+    from db_cache import DB
+
+    reddit_id = payload.get("reddit_id") or payload.get("reddit_post_id")
+    if not reddit_id:
+        raise ValueError(f"Missing reddit_id in payload: {payload}")
+
+    db = DB()
+    post_data = fetch_reddit_submission(reddit_id)
+    if not post_data:
+        raise RuntimeError(f"Failed to fetch Reddit submission {reddit_id}")
+
+    jwt = get_valid_token()
+    subreddit = post_data.get("subreddit")
+    if not subreddit:
+        raise RuntimeError("Missing subreddit info in Reddit post")
+
+    community_name = SUB_MAP.get(subreddit.lower())
+    if not community_name:
+        raise RuntimeError(f"No mapped community for subreddit {subreddit}")
+
+    comm_id = get_community_id(community_name, jwt)
+    lemmy_id = create_lemmy_post(subreddit, post_data, jwt, comm_id)
+    db.save_post(reddit_id, str(lemmy_id), subreddit)
+
+    log(f"✅ Background mirror success: Reddit {reddit_id} → Lemmy {lemmy_id}")
+
+    log(f"✅ Background mirror success: Reddit {reddit_id} → Lemmy {lemmy_id}")
+
+    # ----------------------------------------------------
+    # Enqueue background job for mirroring comments
+    # ----------------------------------------------------
+    try:
+        import sqlite3
+        from datetime import datetime
+        from pathlib import Path
+        import json
+
+        db_path = Path(__file__).parent / "data" / "jobs.db"
+        conn = sqlite3.connect(db_path)
+
+        # Prevent duplicate comment jobs for the same Reddit post
+        cur = conn.execute(
+            "SELECT 1 FROM jobs WHERE type='mirror_comment' AND json_extract(payload, '$.reddit_id') = ?",
+            (reddit_id,),
+        )
+        if cur.fetchone():
+            log(f"⏭️ Comment mirror job already exists for Reddit {reddit_id}, skipping enqueue.")
+        else:
+            payload = {
+                "reddit_id": reddit_id,
+                "reddit_comment_id": f"auto_{reddit_id}",  # marker for job tracking
+                "lemmy_post_id": lemmy_id,
+            }
+            conn.execute(
+                "INSERT INTO jobs (type, payload, status, retries, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "mirror_comment",
+                    json.dumps(payload),
+                    "queued",
+                    0,
+                    datetime.utcnow().isoformat(),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            conn.commit()
+            log(f"🪶 Enqueued comment mirror job for Reddit {reddit_id} → Lemmy {lemmy_id}")
+
+        conn.close()
+
+    except Exception as e:
+        log(f"⚠️ Failed to enqueue comment mirror for {reddit_id}: {e}")
+
+    return {"lemmy_id": lemmy_id}
+
 # ─────────────────────────────────────────────
 # ENTRY POINT
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
     log("🔧 reddit → lemmy bridge starting…")
-    db = DB()  # init DB and connection
-    migrate_legacy_json_to_sqlite(db)
-    while True:
-        try:
-            mirror_once(db)
-        except Exception as e:
-            log(f"❌ Mirror cycle failed: {e}")
-        time.sleep(SLEEP_BETWEEN_CYCLES)
+
+    import sqlite3
+    conn = sqlite3.connect("data/jobs.db")  # ✅ open DB connection
+    db = JobDB(conn)
+
+    migrate_legacy_json_to_sqlite(DB())  # still migrate legacy post_map.json
+
+    try:
+        mirror_loop(db)
+    except Exception as e:
+        log(f"❌ Mirror loop failed: {e}")

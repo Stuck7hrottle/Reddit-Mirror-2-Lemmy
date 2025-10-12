@@ -1,31 +1,29 @@
-# Reddit → Lemmy Bridge
-# Compatible with Python 3.12 and Lemmy-Ansible setups
-
-FROM python:3.12-slim
+# === Reddit-Mirror-2-Lemmy Production Dockerfile ===
+FROM python:3.11-slim
 
 # Set working directory
-WORKDIR /app
+WORKDIR /opt/Reddit-Mirror-2-Lemmy
 
-# Copy dependency files first (for Docker layer caching)
-COPY requirements.txt ./
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git curl sqlite3 bash && \
+    rm -rf /var/lib/apt/lists/*
+
+# Copy project source
+COPY . .
 
 # Install Python dependencies
-# Include praw, requests, python-dotenv and any other required packages
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the project
-COPY . /app
+# Ensure persistent data directory exists
+RUN mkdir -p data
 
-# Ensure /app/data exists for caching, tokens, etc.
-RUN mkdir -p /app/data
+# Environment configuration
+ENV PYTHONUNBUFFERED=1 \
+    TZ=UTC
 
-# Environment variables for stable runtime
-ENV PYTHONUNBUFFERED=1
-ENV DATA_DIR=/app/data
+# Declare volume for persistence
+VOLUME ["/opt/Reddit-Mirror-2-Lemmy/data"]
 
-# Run as non-root user for security (optional but professional)
-RUN useradd -m bridgeuser
-USER bridgeuser
-
-# Default startup command (overrideable by docker-compose.yml)
-CMD ["python3", "-u", "auto_mirror.py"]
+# Default command (overridden by docker-compose)
+CMD ["python3", "background_worker.py"]
