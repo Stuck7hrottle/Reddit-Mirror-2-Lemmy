@@ -1,3 +1,6 @@
+> **Note:** The legacy JSON-based bridge has been archived under the branch [`legacy-json`](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-json).
+> The current `master` branch uses the new SQLite background worker system.
+
 # Reddit → Lemmy Bridge
 
 A self-hosted Python system that mirrors Reddit communities, posts, and comments into matching Lemmy communities.
