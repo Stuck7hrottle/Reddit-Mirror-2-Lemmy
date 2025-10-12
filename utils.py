@@ -129,15 +129,25 @@ def get_community_id(community_name: str, jwt: str) -> int:
 def create_lemmy_post(subreddit: str, post_data: dict, jwt: str, community_id: int) -> int:
     """Create a new Lemmy post from Reddit submission data."""
     url = f"{LEMMY_URL}/api/v3/post"
+
+    # Build Lemmy post body: default to text post, not link post
     body = {
         "name": post_data.get("title", "[untitled]"),
-        "body": post_data.get("selftext", ""),
+        "body": post_data.get("selftext", "") or "",
         "community_id": community_id,
-        "url": post_data.get("url"),
     }
 
+    # Only include 'url' if you explicitly want a link-style post
+    if post_data.get("force_link") and post_data.get("url"):
+        body["url"] = post_data["url"]
+
     try:
-        r = requests.post(url, json=body, headers={"Authorization": f"Bearer {jwt}"}, timeout=30)
+        r = requests.post(
+            url,
+            json=body,
+            headers={"Authorization": f"Bearer {jwt}"},
+            timeout=30,
+        )
         if r.status_code != 200:
             raise RuntimeError(f"Post creation failed: {r.status_code} {r.text}")
 
@@ -147,6 +157,7 @@ def create_lemmy_post(subreddit: str, post_data: dict, jwt: str, community_id: i
 
         log(f"✅ Created Lemmy post for subreddit {subreddit}: ID={post_id}")
         return post_id
+
     except Exception as e:
         log_error("create_lemmy_post", e)
         raise

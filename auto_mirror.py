@@ -16,6 +16,7 @@ import os
 import time
 import json
 import requests
+import sqlite3
 from pathlib import Path
 from datetime import datetime, timedelta
 import sys
@@ -26,6 +27,7 @@ from db_cache import DB
 from comment_mirror import mirror_comment_to_lemmy
 import asyncio
 import logging
+#from community_cache import map_subreddit_to_community
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,21 @@ TEST_MODE = os.getenv("TEST_MODE", "false").lower() == "true"
 ENABLE_MEDIA_PREVIEW = os.getenv("ENABLE_MEDIA_PREVIEW", "true").lower() == "true"
 EMBED_PERMALINK_FOOTER = os.getenv("EMBED_PERMALINK_FOOTER", "true").lower() == "true"
 MAX_GALLERY_IMAGES = int(os.getenv("MAX_GALLERY_IMAGES", "10"))
+
+POST_FETCH_LIMIT = os.getenv("POST_FETCH_LIMIT", "10")  # "10" or "all"
+
+# ─────────────────────────────────────────────
+# COMMUNITY CACHE HELPER
+# ─────────────────────────────────────────────
+from community_cache import get_cache, resolve_community_id
+
+def map_subreddit_to_community(subreddit_name: str) -> str | None:
+    """
+    Maps a Reddit subreddit name to its Lemmy community name.
+    Falls back to matching names directly (e.g., r/fosscad2 → c/fosscad2).
+    """
+    # Example: you can later extend this to handle custom mappings
+    return subreddit_name.lower()
 
 # ─────────────────────────────────────────────
 # SUBREDDIT → COMMUNITY MAP
@@ -201,30 +218,32 @@ def guess_imgur_direct(u: str) -> str | None:
         return f"https://i.imgur.com/{m.group(2)}.jpg"
     return None
 
+def _get(obj, key, default=None):
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
 def build_media_block_from_submission(sub) -> tuple[str, str | None]:
-    if not isinstance(sub, dict):
-        sub = getattr(sub, "__dict__", {})
-
-    if not ENABLE_MEDIA_PREVIEW:
-        base = to_md(getattr(sub, "selftext", "") or "")
-        link_line = f"\n\n🔗 [View on Reddit](https://reddit.com{sub.permalink})"
-        return (base + link_line if EMBED_PERMALINK_FOOTER else base, sub.url if getattr(sub, "url", None) else None)
-
+    # Leave objects as-is; we’ll read via _get
     body_parts, media_lines = [], []
-    st = to_md(getattr(sub, "selftext", "") or "")
+
+    st = to_md(_get(sub, "selftext", "") or "")
     if st.strip():
         body_parts.append(st)
 
-    if getattr(sub, "is_gallery", False) and hasattr(sub, "gallery_data") and hasattr(sub, "media_metadata"):
+    # Gallery
+    if bool(_get(sub, "is_gallery", False)) and _get(sub, "gallery_data") and _get(sub, "media_metadata"):
         try:
-            items = sub.gallery_data.get("items", [])[:MAX_GALLERY_IMAGES]
+            items = _get(sub, "gallery_data", {}).get("items", [])[:MAX_GALLERY_IMAGES]
+            media_meta = _get(sub, "media_metadata", {})
             for idx, it in enumerate(items, 1):
                 media_id = it.get("media_id")
-                meta = sub.media_metadata.get(media_id, {})
+                meta = media_meta.get(media_id, {})
                 src = None
-                if "s" in meta and isinstance(meta["s"], dict):
-                    src = meta["s"].get("u") or meta["s"].get("gif") or meta["s"].get("mp4")
-                if not src and "p" in meta and isinstance(meta["p"], list) and meta["p"]:
+                if isinstance(meta.get("s"), dict):
+                    s = meta["s"]
+                    src = s.get("u") or s.get("gif") or s.get("mp4")
+                if not src and isinstance(meta.get("p"), list) and meta["p"]:
                     src = meta["p"][-1].get("u")
                 caption = it.get("caption") or ""
                 if src:
@@ -232,23 +251,32 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
                     media_lines.append(f"![Image {idx}]({src}){cap}")
         except Exception:
             pass
-    elif getattr(sub, "url", "") and (sub.domain in ("i.redd.it", "i.imgur.com") or is_image_url(sub.url) or guess_imgur_direct(sub.url)):
-        img = sub.url
-        if not is_image_url(img):
+
+    # Single image / imgur
+    url = _get(sub, "url", "") or ""
+    domain = _get(sub, "domain", "") or ""
+    if (domain in ("i.redd.it", "i.imgur.com") or is_image_url(url) or guess_imgur_direct(url)):
+        img = url
+        if img and not is_image_url(img):
             guess = guess_imgur_direct(img)
             if guess:
                 img = guess
-        media_lines.append(f"![Image]({img})")
-    elif getattr(sub, "domain", "") == "v.redd.it" and getattr(sub, "media", None):
+        if img:
+            media_lines.append(f"![Image]({img})")
+
+    # Reddit hosted video
+    if domain == "v.redd.it" and _get(sub, "media"):
         try:
-            rv = sub.media.get("reddit_video") or {}
+            rv = _get(sub, "media", {}).get("reddit_video") or {}
             mp4 = rv.get("fallback_url")
             if mp4:
-                media_lines.append(f"[🎬 View video on Reddit]({sub.url})")
+                media_lines.append(f"[🎬 View video on Reddit]({_get(sub, 'url', '')})")
         except Exception:
             pass
-    elif getattr(sub, "url", "") and not getattr(sub, "is_self", False):
-        media_lines.append(f"[External link]({sub.url})")
+
+    # External link (non-self)
+    if url and not _get(sub, "is_self", False) and not media_lines:
+        media_lines.append(f"[External link]({url})")
 
     if media_lines:
         if st.strip():
@@ -256,7 +284,7 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
         body_parts += media_lines
 
     if EMBED_PERMALINK_FOOTER:
-        permalink = sub.get("permalink") if isinstance(sub, dict) else getattr(sub, "permalink", None)
+        permalink = _get(sub, "permalink", None)
         if permalink:
             if not permalink.startswith("http"):
                 permalink = f"https://www.reddit.com{permalink}"
@@ -487,41 +515,93 @@ def migrate_legacy_json_to_sqlite(db: DB):
 
     log(f"📦 Migration complete: imported={imported}, skipped(existing)={skipped} (JSON kept as backup).")
 
-def mirror_once(subreddit_name: str, community_name: str, reddit, jwt: str, db: JobDB, test_mode: bool = False):
-    """Mirror latest Reddit posts and comments to Lemmy."""
-    print(f"🔍 Checking r/{subreddit_name} → c/{community_name} @ {datetime.utcnow()}")
+def mirror_once(subreddit_name: str, test_mode: bool = False):
+    """
+    Mirrors posts from a single subreddit into its mapped Lemmy community.
+    Supports pagination to fetch >100 posts when POST_FETCH_LIMIT='all'.
+    """
+    print(f"▶️ comment_mirror.py starting (refresh=False)")
+    print(f"🔁 Fetching subreddit: r/{subreddit_name}")
 
-    # Fetch posts from Reddit
-    print("🔄 Live mode: Fetching from Reddit API (limit=10)…")
-    submissions = reddit.subreddit(subreddit_name).new(limit=10)
+    db = JobDB()
+    community_name = map_subreddit_to_community(subreddit_name)
+    if not community_name:
+        print(f"⚠️ No community mapping found for r/{subreddit_name}")
+        return
 
-    for submission in submissions:
-        reddit_post_id = submission.id
-        title = submission.title
-        print(f"🪶 Found Reddit post {reddit_post_id}: {title}")
+    # Determine fetch limit
+    limit_str = str(POST_FETCH_LIMIT).lower()
+    fetch_all = limit_str in ("all", "none", "0")
+    per_page = 100 if fetch_all else int(POST_FETCH_LIMIT)
+    max_batches = 10  # safety guard: up to ~1000 posts total
 
-        # STEP 1: Check if post mirror job already exists
-        cur = db.conn.execute(
-            "SELECT id FROM jobs WHERE type='mirror_post' AND json_extract(payload, '$.reddit_post_id') = ?",
-            (reddit_post_id,),
-        )
-        existing_post_job = cur.fetchone()
-        if not existing_post_job:
-            if test_mode:
-                print(f"🧪 [TEST MODE] Would enqueue mirror_post for Reddit {reddit_post_id}")
+    print(f"🔄 Live mode: Fetching from Reddit API "
+          f"(limit={'all' if fetch_all else per_page})…")
+
+    after = None
+    fetched = 0
+
+    while True:
+        params = {"limit": per_page}
+        if after:
+            params["after"] = after
+
+        url = f"https://www.reddit.com/r/{subreddit_name}/new.json"
+        headers = {"User-Agent": "RedditToLemmyBridge/1.1 (by u/YourBotName)"}
+        r = requests.get(url, params=params, headers=headers, timeout=20)
+
+        if not r.ok:
+            print(f"⚠️ Reddit API error {r.status_code} for r/{subreddit_name}")
+            break
+
+        data = r.json().get("data", {})
+        children = data.get("children", [])
+        if not children:
+            break
+
+        for item in children:
+            submission = item["data"]
+            reddit_post_id = submission["id"]
+            title = submission.get("title", "[untitled]")
+
+            print(f"🪶 Found Reddit post {reddit_post_id}: {title}")
+
+            cur = db.conn.execute(
+                "SELECT id FROM jobs WHERE type='mirror_post' "
+                "AND json_extract(payload, '$.reddit_post_id') = ?",
+                (reddit_post_id,),
+            )
+            existing_post_job = cur.fetchone()
+
+            if not existing_post_job:
+                if test_mode:
+                    print(f"🧪 [TEST MODE] Would enqueue mirror_post for Reddit {reddit_post_id}")
+                else:
+                    print(f"🪶 Enqueuing mirror_post job for Reddit {reddit_post_id}")
+                    db.enqueue(
+                        "mirror_post",
+                        {
+                            "reddit_post_id": reddit_post_id,
+                            "community_name": community_name,
+                        },
+                    )
             else:
-                print(f"🪶 Enqueuing mirror_post job for Reddit {reddit_post_id}")
-                db.enqueue(
-                    "mirror_post",
-                    {
-                        "reddit_post_id": reddit_post_id,
-                        "community_name": community_name,
-                    },
-                )
-        else:
-            print(f"⏭️ mirror_post job already exists for Reddit {reddit_post_id}")
+                print(f"⏭️ mirror_post job already exists for Reddit {reddit_post_id}")
 
-    print("🕒 Sleeping 900s...")
+            fetched += 1
+
+        after = data.get("after")
+        if not after:
+            break
+
+        # Safety limit: prevent infinite loops
+        if not fetch_all or fetched >= per_page * max_batches:
+            break
+
+        print(f"➡️ Fetched {fetched} posts so far — continuing to next page…")
+        time.sleep(2)  # polite delay for Reddit API rate limits
+
+    print(f"✨ Done — processed {fetched} posts from r/{subreddit_name}.")
 
 def mirror_loop(db: JobDB):
     """Continuously mirror Reddit posts/comments to Lemmy communities."""
@@ -538,14 +618,7 @@ def mirror_loop(db: JobDB):
         log("🔁 Running refresh cycle...")
         for reddit_sub, lemmy_comm in SUB_MAP.items():
             try:
-                mirror_once(
-                    subreddit_name=reddit_sub,
-                    community_name=lemmy_comm,
-                    reddit=reddit,
-                    jwt=jwt,
-                    db=db,
-                    test_mode=TEST_MODE,
-                )
+                mirror_once(subreddit_name=reddit_sub, test_mode=TEST_MODE)
             except Exception as e:
                 log(f"⚠️ Error while mirroring r/{reddit_sub} → c/{lemmy_comm}: {e}")
 
@@ -569,7 +642,8 @@ def fetch_reddit_submission(submission_id: str):
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
     user_agent = "RedditToLemmyBridge/1.1.0 (by u/YourBotName)"
 
-    base_url = f"https://www.reddit.com/by_id/t3_{submission_id}.json"
+#    base_url = f"https://www.reddit.com/by_id/t3_{submission_id}.json"
+    base_url = f"https://www.reddit.com/comments/{submission_id}.json"
     headers = {"User-Agent": user_agent}
 
     # 🔐 Prefer Reddit OAuth API if credentials exist
@@ -616,44 +690,68 @@ def fetch_reddit_submission(submission_id: str):
     return data["data"]["children"][0]["data"]
 
 def update_existing_posts():
+    """
+    Update existing mirrored posts using the jobs.db database.
+    This rebuilds Lemmy post bodies to include new gallery/video embeds
+    without re-mirroring or duplicating posts.
+    """
+    import sqlite3
+    import time
+    from db_cache import DB
+    db = DB()
+
+    start_time = time.time()
+
+    # Try legacy JSON first (backward compatibility)
     post_map_path = DATA_DIR / "post_map.json"
-    if not post_map_path.exists():
-        log("❌ No post_map.json found.")
-        return
-    try:
-        post_map = json.loads(post_map_path.read_text())
-    except Exception as e:
-        log(f"❌ Failed to load post_map.json: {e}")
+    legacy_entries = {}
+    if post_map_path.exists():
+        try:
+            legacy_entries = json.loads(post_map_path.read_text())
+            log(f"🗂️ Loaded {len(legacy_entries)} legacy entries from post_map.json")
+        except Exception as e:
+            log(f"⚠️ Failed to read legacy post_map.json: {e}")
+
+    # Load entries from jobs.db instead of bridge_cache.db
+    db_path = Path("/opt/Reddit-Mirror-2-Lemmy/data") / "jobs.db"
+    if not db_path.exists():
+        log(f"❌ jobs.db not found at {db_path}")
         return
 
-    log(f"🗂️ Loaded {len(post_map)} mirrored posts from {post_map_path}")
-    log(f"🔄 Updating {len(post_map)} existing Lemmy posts with new media embeds...")
+    conn = sqlite3.connect(db_path)
+
+    # Verify that the table exists and fetch Reddit→Lemmy mappings
+    tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table';")]
+    if "posts" not in tables:
+        log("❌ No 'posts' table found in jobs.db")
+        conn.close()
+        return
+
+    cur = conn.execute("SELECT reddit_post_id, lemmy_post_id FROM posts")
+    rows = cur.fetchall()
+    conn.close()
+
+    all_entries = {r[0]: r[1] for r in rows}
+    all_entries.update(legacy_entries)
+
+    if not all_entries:
+        log("❌ No mirrored posts found in jobs.db or JSON.")
+        return
+
+    log(f"🔄 Updating {len(all_entries)} existing Lemmy posts with new media embeds...")
 
     jwt = get_cached_jwt() or lemmy_login(force=True)
     headers = {"Authorization": f"Bearer {jwt}"}
     success = 0
 
-    for reddit_id, item in post_map.items():
+    for reddit_id, post_id in all_entries.items():
         try:
-            if isinstance(item, str):
-                post_id = None
-                reddit_id = item
-            elif isinstance(item, dict):
-                post_id = item.get("lemmy_id")
-                reddit_id = item.get("reddit_id") or reddit_id
-            else:
-                log(f"⚠️ Unexpected entry type: {type(item)}")
-                continue
-
-            if not reddit_id or not post_id:
-                log(f"⚠️ Skipping invalid entry: {item}")
-                continue
-
             sub_data = fetch_reddit_submission(reddit_id)
             if not sub_data:
                 log(f"⚠️ Unable to fetch Reddit data for {reddit_id}")
                 continue
 
+            # Ensure gallery and media keys exist
             for key in ["is_gallery", "media_metadata", "thumbnail"]:
                 sub_data.setdefault(key, None)
 
@@ -663,20 +761,33 @@ def update_existing_posts():
             payload = {"post_id": post_id, "body": new_body}
             r = requests.put(update_url, json=payload, headers=headers, timeout=20)
 
+            # 🧩 Improvement #1 — retry on transient server errors
+            if r.status_code in (500, 502, 503):
+                log(f"⚠️ Lemmy temporarily unavailable (status={r.status_code}), retrying after 5s…")
+                time.sleep(5)
+                continue
+
             if r.status_code == 404:
-                log(f"⚠️ Lemmy 404 updating post {reddit_id} (ID={post_id}) — check if deleted/unlisted.")
+                log(f"⚠️ Lemmy 404 updating post {reddit_id} (ID={post_id}) — may have been deleted/unlisted.")
             elif not r.ok:
                 log(f"⚠️ Failed updating {reddit_id} (Lemmy ID={post_id}): {r.status_code} {r.text[:120]}")
             else:
                 success += 1
                 log(f"✅ Updated '{sub_data.get('title', 'Untitled')}' (Lemmy ID={post_id})")
 
+            # 🧩 Improvement #2 — small rate-limit buffer
             time.sleep(1.5)
+            if success % 25 == 0:
+                log("⏳ Taking a short 5-second pause to respect API rate limits…")
+                time.sleep(5)
+
         except Exception as e:
             log(f"⚠️ Exception updating {reddit_id}: {e}")
             continue
 
-    log(f"✨ Done — updated {success}/{len(post_map)} posts.")
+    # 🧩 Improvement #3 — log total duration
+    duration = time.time() - start_time
+    log(f"✨ Done — updated {success}/{len(all_entries)} posts in {duration:.1f}s.")
 
 # ─────────────────────────────────────────────
 # UPDATE TRIGGER
