@@ -1,0 +1,19 @@
+version: "3"
+
+services:
+  reddit-mirror:
+    build: .
+    container_name: reddit_mirror
+    restart: unless-stopped
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+    env_file: .env
+
+  reddit-refresh:
+    build: .
+    container_name: reddit_refresh
+    command: ["python3", "auto_mirror.py", "--refresh"]
+    restart: unless-stopped
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+    env_file: .env
