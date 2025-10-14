@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="bg-gray-800 p-4 rounded-lg shadow mb-4">
+  <h2 class="text-2xl font-semibold mb-3">Recent Logs</h2>
+  <div id="log-container" hx-get="/logs" hx-trigger="every 5s" hx-target="#log-container" hx-swap="outerHTML">
+    <pre class="bg-gray-900 p-3 rounded overflow-y-scroll h-[500px] text-sm">
+{% for line in lines %}
+{{ line.strip() }}
+{% endfor %}
+    </pre>
+  </div>
+</div>
+
+<a href="/" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded">← Back</a>
+{% endblock %}

@@ -4,3 +4,4 @@ python-dotenv
 markdownify
 aiohttp
 rich
+psutil

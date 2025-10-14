@@ -520,7 +520,7 @@ def mirror_once(subreddit_name: str, test_mode: bool = False):
     Mirrors posts from a single subreddit into its mapped Lemmy community.
     Supports pagination to fetch >100 posts when POST_FETCH_LIMIT='all'.
     """
-    print(f"▶️ comment_mirror.py starting (refresh=False)")
+    print(f"▶️ auto_mirror: fetching new posts from r/{subreddit_name} (refresh=False)")
     print(f"🔁 Fetching subreddit: r/{subreddit_name}")
 
     db = JobDB()

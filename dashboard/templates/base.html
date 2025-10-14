@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Mirror Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="bg-gray-900 text-gray-100 font-sans">
+  <div class="container">
+    <h1 class="text-3xl font-bold mb-4">🪞 Reddit → Lemmy Mirror Dashboard</h1>
+    <nav class="mb-6">
+      <a href="/" class="mr-4 text-blue-400 hover:text-blue-200">Status</a>
+      <a href="/logs" class="text-blue-400 hover:text-blue-200">Logs</a>
+    </nav>
+    {% block content %}{% endblock %}
+  </div>
+</body>
+</html>

@@ -138,6 +138,15 @@ def lemmy_login(force: bool = False) -> str:
     payload = {"username_or_email": LEMMY_USER, "password": LEMMY_PASS}
     url = f"{LEMMY_URL}/api/v3/user/login"
 
+        # 🧩 Prevent redundant logins if another process logged in recently
+    if not force and not acquire_token_lock(timeout=90):
+        if TOKEN_FILE.exists():
+            data = load_json(TOKEN_FILE, {})
+            jwt = data.get("jwt")
+            if jwt:
+                print("♻️ Reusing cached Lemmy JWT due to recent login lock.")
+                return jwt
+
     for attempt in range(5):
         global LAST_LOGIN_TIME
         if "LAST_LOGIN_TIME" not in globals():
@@ -567,8 +576,8 @@ async def mirror_comment_to_lemmy(payload: dict) -> dict:
         else:
             print(f"⚠️ Failed to mirror comment {reddit_comment_id}")
 
-        # Throttle to be Reddit-API friendly
-        await asyncio.sleep(COMMENT_SLEEP)
+        import random
+        await asyncio.sleep(COMMENT_SLEEP + random.uniform(0, 2))
 
     print(f"✅ Completed comment mirror for Reddit post {reddit_post_id}: {mirrored} new, {skipped} skipped.")
     return {"mirrored": mirrored, "skipped": skipped}
