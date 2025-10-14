@@ -346,8 +346,15 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
         body_md, link_override = (post.get("selftext", ""), None)
 
     import html
-    title = (post.get("title") or "Untitled").strip()
-    title = html.unescape(title).replace("\n", " ").replace("\r", " ")
+    import re
+
+    title = post.get("title") or "Untitled"
+    title = html.unescape(title)
+    title = re.sub(r"[\x00-\x1F\x7F]", "", title)  # remove control chars
+    title = title.replace("\n", " ").replace("\r", " ").strip()
+    title = re.sub(r"\s+", " ", title)  # normalize spacing
+    if not title:
+        title = "Untitled"
     if len(title) > 180:
         title = title[:177] + "…"
 
@@ -367,7 +374,14 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
         r = requests.post(url, json=payload, headers=headers, timeout=20)
 
     if not r.ok:
-        raise RuntimeError(f"Lemmy post failed: {r.status_code} {r.text[:200]}")
+        # Handle Lemmy rate limit gracefully
+        if r.status_code == 400 and "rate_limit" in r.text:
+            log("⏳ Lemmy rate limit triggered — sleeping 15 s before one retry…")
+            time.sleep(15)
+            r = requests.post(url, json=payload, headers=headers, timeout=20)
+
+        if not r.ok:
+            raise RuntimeError(f"Lemmy post failed: {r.status_code} {r.text[:200]}")
 
     pid = r.json()["post_view"]["post"]["id"]
     log(f"✅ Posted '{post['title']}' (Lemmy ID={pid})")

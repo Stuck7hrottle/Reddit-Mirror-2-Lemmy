@@ -33,6 +33,7 @@ class MirrorWorker(BaseWorker):
 
         logger.info(f"[{self.name}] Mirroring Reddit post {reddit_id}")
         result = await mirror_post_to_lemmy(payload)
+        await asyncio.sleep(10)
         logger.info(f"[{self.name}] ✅ Mirrored post {reddit_id} → {result}")
         return result
 
