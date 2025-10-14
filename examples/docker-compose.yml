@@ -17,3 +17,16 @@ services:
     volumes:
       - ./data:/opt/Reddit-Mirror-2-Lemmy/data
     env_file: .env
+
+  mirror-dashboard:
+    build:
+      context: ./dashboard
+    container_name: mirror-dashboard
+    ports:
+      - "8080:8080"
+    environment:
+      - DATA_DIR=/opt/Reddit-Mirror-2-Lemmy/data
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+      - ./dashboard/static:/app/static
+    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
