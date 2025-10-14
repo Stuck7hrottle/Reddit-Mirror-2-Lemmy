@@ -87,6 +87,20 @@ def log(msg: str):
     print(f"{datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
 
 # ─────────────────────────────────────────────
+# COMMUNITY REFRESH SCHEDULER
+# ─────────────────────────────────────────────
+def maybe_refresh_community_map(jwt):
+    """Refresh Lemmy community map if stale (older than 6 hours)."""
+    mapping = load_json(COMMUNITY_MAP_FILE, {})
+    last = mapping.get("_fetched_at", 0)
+    age = time.time() - last
+    if age > COMMUNITY_REFRESH_HOURS * 3600:
+        log(f"🕓 Community map is {int(age/3600)}h old — refreshing...")
+        refresh_community_map(jwt)
+    else:
+        log(f"🗺️ Community map age {int(age/3600)}h — still fresh.")
+
+# ─────────────────────────────────────────────
 # LEGACY POST MAP (for one-time migration)
 # ─────────────────────────────────────────────
 if POST_MAP_FILE.exists():
@@ -564,6 +578,13 @@ def mirror_once(subreddit_name: str, test_mode: bool = False):
             reddit_post_id = submission["id"]
             title = submission.get("title", "[untitled]")
 
+            # 🧩 Skip posts that are already mirrored (in bridge_cache.db)
+            from db_cache import DB
+            cache_db = DB()
+            if cache_db.get_lemmy_post_id(reddit_post_id):
+                print(f"⏭️ Skipping already mirrored post: Reddit {reddit_post_id}")
+                continue
+
             print(f"🪶 Found Reddit post {reddit_post_id}: {title}")
 
             cur = db.conn.execute(
@@ -608,6 +629,8 @@ def mirror_loop(db: JobDB):
     import praw
 
     jwt = get_valid_token()
+    maybe_refresh_community_map(jwt)
+
     reddit = praw.Reddit(
         client_id=os.getenv("REDDIT_CLIENT_ID"),
         client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
@@ -811,6 +834,13 @@ async def mirror_post_to_lemmy(payload: dict):
         raise ValueError(f"Missing reddit_id in payload: {payload}")
 
     db = DB()
+
+    # 🧩 Prevent duplicate Lemmy posts if already mirrored
+    existing = db.get_lemmy_post_id(reddit_id)
+    if existing:
+        log(f"⏭️ Skipping duplicate: Reddit {reddit_id} already mirrored (Lemmy ID={existing})")
+        return {"lemmy_id": existing}
+
     post_data = fetch_reddit_submission(reddit_id)
     if not post_data:
         raise RuntimeError(f"Failed to fetch Reddit submission {reddit_id}")
@@ -827,8 +857,6 @@ async def mirror_post_to_lemmy(payload: dict):
     comm_id = get_community_id(community_name, jwt)
     lemmy_id = create_lemmy_post(subreddit, post_data, jwt, comm_id)
     db.save_post(reddit_id, str(lemmy_id), subreddit)
-
-    log(f"✅ Background mirror success: Reddit {reddit_id} → Lemmy {lemmy_id}")
 
     log(f"✅ Background mirror success: Reddit {reddit_id} → Lemmy {lemmy_id}")
 

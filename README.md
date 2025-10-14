@@ -3,7 +3,11 @@
 
 # Reddit → Lemmy Bridge
 
-A self-hosted Python system that mirrors Reddit communities, posts, and comments into matching Lemmy communities.
+A self-hosted Python system that mirrors Reddit communities, posts, and comments into matching Lemmy communities.  
+Now includes a lightweight **web dashboard** for live monitoring and logs.
+
+> **Note:** The legacy JSON-based bridge has been archived under the branch [`legacy-json`](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-json).  
+> The current `master` branch uses the new SQLite background worker system.
 
 ---
 
@@ -16,6 +20,7 @@ A self-hosted Python system that mirrors Reddit communities, posts, and comments
 - Automatically skips duplicates using local SQLite caches  
 - Preserves Reddit post permalinks and embeds galleries cleanly in Lemmy  
 - Optional refresh/update mode to rebuild posts with new formatting or embeds  
+- **🖥️ New:** Built-in **FastAPI dashboard** for live job stats, uptime, and recent logs  
 
 ---
 
@@ -25,6 +30,7 @@ A self-hosted Python system that mirrors Reddit communities, posts, and comments
 |------------|-------------|
 | **reddit-mirror** | Worker service that mirrors posts and comments from Reddit to Lemmy |
 | **reddit-refresh** | Scheduler container that periodically re-triggers mirroring cycles |
+| **mirror-dashboard** | (Optional) FastAPI + Tailwind web UI showing live job status and logs |
 | **data/** | Local persistent directory containing SQLite databases (`jobs.db`, `bridge_cache.db`) and caches |
 
 Each subreddit listed in the bridge’s configuration will map to a Lemmy community of the same name (e.g., `r/example` → `c/example`).
@@ -60,6 +66,49 @@ docker compose up -d
 Monitor logs:
 ```bash
 docker compose logs -f reddit-refresh
+```
+
+---
+
+## 🌐 Dashboard (Optional but Recommended)
+
+A simple **FastAPI web dashboard** runs alongside the bridge to show live system stats.
+
+**Default URL:**  
+[http://localhost:8080](http://localhost:8080)
+
+### Dashboard Views
+- `/` → Overview (status, queues, uptime, duplicates skipped, etc.)  
+- `/logs` → Last 50 log lines (auto-updates manually via refresh)  
+- `/metrics` → JSON API endpoint for external monitoring or Prometheus  
+
+**Example:**
+```bash
+curl http://localhost:8080/metrics
+```
+```json
+{
+  "mirror_status": "working",
+  "posts_queued": 3,
+  "comments_queued": 0,
+  "posts_done": 1208,
+  "duplicates_skipped": 12,
+  "uptime": "2d 6h"
+}
+```
+
+### Securing the Dashboard
+You can easily protect it using Cloudflare Access, Nginx Basic Auth, or by binding to localhost:
+```yaml
+ports:
+  - "127.0.0.1:8080:8080"
+```
+Then access it securely through your Cloudflare tunnel or reverse proxy.
+
+**Example Cloudflare Access Rule:**
+```bash
+cloudflared tunnel route dns reddit-dashboard.example.com
+cloudflared access rule create   --application-name "Reddit Mirror Dashboard"   --include-email your@email.com
 ```
 
 ---
@@ -104,16 +153,11 @@ See [`docs/maintenance.md`](docs/maintenance.md) for:
 - Database inspection (`sqlite3 data/jobs.db`)  
 - Rebuilding containers  
 - Troubleshooting comment syncs  
-
----
-
-## 🧩 Example Folder
-
-| File | Purpose |
-|------|----------|
-| `examples/.env.example` | Minimal environment file for setup |
-| `examples/docker-compose.example.yml` | Example Docker Compose stack |
-| `docs/maintenance.md` | Common admin operations and recovery steps |
+- Checking for duplicate jobs  
+  ```bash
+  sqlite3 data/jobs.db   "SELECT json_extract(payload, '$.reddit_post_id'), COUNT(*) 
+   FROM jobs WHERE type='mirror_post' GROUP BY 1 HAVING COUNT(*)>1;"
+  ```
 
 ---
 
@@ -123,7 +167,7 @@ Planned enhancements:
 - Direct video upload to Lemmy (instead of Reddit-hosted links)
 - Edit tracking for mirrored posts/comments
 - Multi-instance federation sync
-- Web UI for queue and job status
+- **Dashboard v2:** Live auto-refresh, API auth, and job history
 - Optional moderation tools for mirrored content
 
 ---
