@@ -1,0 +1,51 @@
+/* ---- Reddit → Lemmy Mirror Dashboard Styles ---- */
+body {
+  background-color: #111827;
+  color: #e5e7eb;
+  font-family: "Inter", system-ui, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+h1, h2 {
+  color: #f9fafb;
+}
+
+a {
+  color: #60a5fa;
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+  color: #93c5fd;
+}
+
+.container {
+  max-width: 900px;
+  margin: 2rem auto;
+  background: #1f2937;
+  border-radius: 12px;
+  padding: 1.5rem 2rem;
+  box-shadow: 0 0 12px rgba(0,0,0,0.4);
+}
+
+button, .btn {
+  background: #2563eb;
+  color: white;
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+button:hover, .btn:hover {
+  background: #1d4ed8;
+}
+
+pre {
+  background: #0f172a;
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  color: #f3f4f6;
+}
