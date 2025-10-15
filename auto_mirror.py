@@ -335,6 +335,122 @@ def get_community_id(name: str, jwt: str):
     raise RuntimeError(f"community lookup error: could not resolve '{name}' (case-insensitive)")
 
 # ─────────────────────────────────────────────
+# DIRECT MEDIA UPLOADS TO LEMMY (pictrs)
+# ─────────────────────────────────────────────
+import tempfile
+import mimetypes
+import re
+
+def upload_media_to_lemmy(file_path: str, jwt: str) -> str:
+    """
+    Uploads a local video/image to Lemmy's pictrs service.
+    Returns the hosted URL that can be used in posts.
+    Compatible with both modern and legacy pictrs responses.
+    """
+    url = f"{LEMMY_URL}/pictrs/image"
+    mime_type, _ = mimetypes.guess_type(file_path)
+    headers = {"Authorization": f"Bearer {jwt}"}
+
+    log(f"⬆️ Uploading {os.path.basename(file_path)} → Lemmy pictrs...")
+
+    with open(file_path, "rb") as f:
+        # 🧩 Some Lemmy instances require 'images[]', others 'file'
+        # We'll try the modern preferred key first, then fall back.
+        files_primary = {"images[]": (os.path.basename(file_path), f, mime_type or "application/octet-stream")}
+        r = requests.post(url, files=files_primary, headers=headers, timeout=180)
+
+    # If that fails due to field mismatch, retry once with legacy key
+    if r.status_code == 400 and "unexpected name or type" in r.text.lower():
+        log("⚙️ Retrying Lemmy upload with legacy field name 'file'...")
+        with open(file_path, "rb") as f:
+            files_legacy = {"file": (os.path.basename(file_path), f, mime_type or "application/octet-stream")}
+            r = requests.post(url, files=files_legacy, headers=headers, timeout=180)
+
+    if not r.ok:
+        raise RuntimeError(f"Lemmy upload failed: {r.status_code} {r.text[:200]}")
+
+    # 🔍 Parse response safely across all pictrs formats
+    data = r.json()
+    file_entry = (data.get("files") or [{}])[0]
+    file_field = file_entry.get("file")
+
+    # Handle modern vs. legacy formats
+    if isinstance(file_field, dict):
+        hosted = file_field.get("url")
+    elif isinstance(file_field, str):
+        hosted = f"{LEMMY_URL}/pictrs/image/{file_field}"
+    else:
+        hosted = file_entry.get("url")
+
+    if not hosted:
+        raise RuntimeError(f"Unexpected Lemmy upload response: {data}")
+
+    log(f"✅ Uploaded media to Lemmy: {hosted}")
+    return hosted
+
+def maybe_upload_reddit_video(post_data: dict, jwt: str) -> dict:
+    """
+    Detects video sources (v.redd.it, .mp4, .webm, .mov, etc.)
+    and uploads them directly to Lemmy's pictrs service.
+    Rewrites post_data['url'] to the new Lemmy URL if successful.
+    """
+    reddit_url = post_data.get("url", "")
+    domain = post_data.get("domain", "")
+    video_url = None
+
+    # ── 1️⃣ Detect Reddit-hosted video
+    if "v.redd.it" in reddit_url or domain == "v.redd.it":
+        media = post_data.get("media") or {}
+        video_url = (
+            media.get("reddit_video", {})
+            .get("fallback_url")
+        )
+
+    # ── 2️⃣ Detect generic direct video links (.mp4, .webm, .mov)
+    elif re.search(r"\.(mp4|webm|mov)(\?.*)?$", reddit_url, re.I):
+        video_url = reddit_url
+
+    # ── 3️⃣ Detect known video domains (imgur, streamable, odysee, rumble)
+    elif any(x in reddit_url.lower() for x in ["streamable.com", "odysee.com", "rumble.com", "imgur.com"]):
+        # For these, try direct mp4 variant (works for most cases)
+        m = re.match(r"https?://(?:www\.)?imgur\.com/([A-Za-z0-9]+)", reddit_url, re.I)
+        if m:
+            video_url = f"https://i.imgur.com/{m.group(1)}.mp4"
+        elif "streamable.com" in reddit_url:
+            log("⚠️ Streamable videos often need manual download — attempting direct fetch anyway.")
+            video_url = reddit_url
+        else:
+            video_url = reddit_url  # fallback
+
+    if not video_url:
+        return post_data  # not a supported video
+
+    try:
+        log(f"⬇️ Downloading video: {video_url}")
+        r = requests.get(video_url, stream=True, timeout=90)
+        r.raise_for_status()
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
+            for chunk in r.iter_content(chunk_size=8192):
+                tmp.write(chunk)
+            tmp_path = tmp.name
+
+        lemmy_url = upload_media_to_lemmy(tmp_path, jwt)
+        os.unlink(tmp_path)
+
+        # Replace Reddit or external video URL with Lemmy-hosted one
+        post_data["url"] = lemmy_url
+        log(f"🎬 Replaced external video with Lemmy upload: {lemmy_url}")
+
+        # 🧩 Metric marker for dashboard stats
+        log("📊 METRIC_VIDEO_UPLOAD_SUCCESS")
+
+    except Exception as e:
+        log(f"⚠️ Video upload failed (falling back to original link): {e}")
+
+    return post_data
+
+# ─────────────────────────────────────────────
 # POST CREATION
 # ─────────────────────────────────────────────
 def create_lemmy_post(subreddit_name, post, jwt, community_id):
@@ -350,9 +466,20 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
 
     title = post.get("title") or "Untitled"
     title = html.unescape(title)
-    title = re.sub(r"[\x00-\x1F\x7F]", "", title)  # remove control chars
-    title = title.replace("\n", " ").replace("\r", " ").strip()
-    title = re.sub(r"\s+", " ", title)  # normalize spacing
+
+    # Remove control chars, zero-width spaces, BOMs, etc.
+    title = re.sub(r"[\x00-\x1F\x7F\u200B\u200C\u200D\uFEFF]", "", title)
+
+    # Replace line breaks and tabs with spaces
+    title = re.sub(r"[\r\n\t]+", " ", title)
+
+    # Collapse multiple spaces
+    title = re.sub(r"\s{2,}", " ", title)
+
+    # Remove surrogate pairs / invalid Unicode (prevents Rust JSON rejection)
+    title = title.encode("utf-8", "ignore").decode("utf-8", "ignore")
+
+    title = title.strip()
     if not title:
         title = "Untitled"
     if len(title) > 180:
@@ -867,6 +994,9 @@ async def mirror_post_to_lemmy(payload: dict):
     community_name = SUB_MAP.get(subreddit.lower())
     if not community_name:
         raise RuntimeError(f"No mapped community for subreddit {subreddit}")
+        
+    # 🆕 Upload videos directly to Lemmy if detected
+    post_data = maybe_upload_reddit_video(post_data, jwt)
 
     comm_id = get_community_id(community_name, jwt)
     lemmy_id = create_lemmy_post(subreddit, post_data, jwt, comm_id)

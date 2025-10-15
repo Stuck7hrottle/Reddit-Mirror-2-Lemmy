@@ -52,6 +52,7 @@ def get_stats():
         "posts_queued": 0,
         "comments_queued": 0,
         "duplicates_skipped": 0,
+        "videos_uploaded": 0,   # 🆕 new metric
         "posts_done": 0,
         "uptime": "?",
     }
@@ -67,14 +68,18 @@ def get_stats():
             elif status == "queued":
                 stats["posts_queued"] += count
             elif status == "in_progress":
+                stats["posts_queued"] += count  # 👈 include active jobs too
                 stats["mirror_status"] = "working"
         conn.close()
 
     # 🪶 Parse duplicates skipped from logs (quick scan)
     if LOG_FILE.exists():
         try:
-            lines = tail_log(LOG_FILE, 200)
+            lines = tail_log(LOG_FILE, 300)
             stats["duplicates_skipped"] = sum("Skipping duplicate" in l for l in lines)
+
+            # 🎬 Count successful video uploads
+            stats["videos_uploaded"] = sum("METRIC_VIDEO_UPLOAD_SUCCESS" in l for l in lines)
         except Exception:
             pass
 
