@@ -507,6 +507,11 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
             time.sleep(15)
             r = requests.post(url, json=payload, headers=headers, timeout=20)
 
+        # ⚠️ Skip invalid titles immediately
+        if r.status_code == 400 and '"invalid_post_title"' in r.text:
+            log(f"❌ Skipping post {post.get('id')} due to invalid title: {repr(title)}")
+            return None
+
         if not r.ok:
             raise RuntimeError(f"Lemmy post failed: {r.status_code} {r.text[:200]}")
 
@@ -1000,8 +1005,28 @@ async def mirror_post_to_lemmy(payload: dict):
 
     comm_id = get_community_id(community_name, jwt)
     lemmy_id = create_lemmy_post(subreddit, post_data, jwt, comm_id)
-    db.save_post(reddit_id, str(lemmy_id), subreddit)
+    if lemmy_id is None:
+        log(f"⚠️ Post {reddit_id} skipped due to invalid title, marking as failed in jobs.db")
 
+        try:
+            import sqlite3
+            from datetime import datetime
+            db_path = Path(__file__).parent / "data" / "jobs.db"
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "UPDATE jobs SET status=?, updated_at=? WHERE type='mirror_post' AND json_extract(payload, '$.reddit_post_id')=?",
+                ("failed", datetime.utcnow().isoformat(), reddit_id),
+            )
+            conn.commit()
+            conn.close()
+            log(f"🟥 Marked mirror_post job for Reddit {reddit_id} as failed (invalid title).")
+        except Exception as e:
+            log(f"⚠️ Failed to update jobs.db for skipped post {reddit_id}: {e}")
+
+        return {"lemmy_id": None}
+
+    # ✅ Only run these if a Lemmy post was actually created
+    db.save_post(reddit_id, str(lemmy_id), subreddit)
     log(f"✅ Background mirror success: Reddit {reddit_id} → Lemmy {lemmy_id}")
 
     # ----------------------------------------------------
