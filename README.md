@@ -1,6 +1,3 @@
-> **Note:** The legacy JSON-based bridge has been archived under the branch [`legacy-json`](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-json).
-> The current `master` branch uses the new SQLite background worker system.
-
 # Reddit → Lemmy Bridge
 
 A self-hosted Python system that mirrors Reddit communities, posts, and comments into matching Lemmy communities.  
@@ -47,8 +44,8 @@ cd reddit-to-lemmy
 
 ### 2️⃣ Copy Example Configuration
 ```bash
-cp examples/.env.example .env
-cp examples/docker-compose.example.yml docker-compose.yml
+cp examples/.env .env
+cp examples/docker-compose.yml docker-compose.yml
 ```
 
 ### 3️⃣ Edit `.env`
