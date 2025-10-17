@@ -86,6 +86,33 @@ def log(msg: str):
     from datetime import datetime, timezone
     print(f"{datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
 
+def reload_sub_map():
+    """Reload SUB_MAP from .env file every refresh cycle."""
+    global SUB_MAP
+    try:
+        from dotenv import dotenv_values
+        env = dotenv_values("/opt/Reddit-Mirror-2-Lemmy/.env")  # adjust if path differs
+        new_map_raw = env.get("SUB_MAP", "")
+        if not new_map_raw:
+            return
+
+        new_map = {}
+        for pair in new_map_raw.split(","):
+            if ":" in pair:
+                k, v = pair.split(":", 1)
+                new_map[k.strip().lower()] = v.strip().lower()
+
+        added = [k for k in new_map if k not in SUB_MAP]
+        removed = [k for k in SUB_MAP if k not in new_map]
+        SUB_MAP = new_map
+
+        if added or removed:
+            log(f"♻️ Reloaded SUB_MAP from .env (added={added}, removed={removed})")
+        else:
+            log("✅ SUB_MAP reloaded (no changes)")
+    except Exception as e:
+        log(f"⚠️ Failed to reload .env SUB_MAP: {e}")
+
 # ─────────────────────────────────────────────
 # LEGACY POST MAP (for one-time migration)
 # ─────────────────────────────────────────────
@@ -310,14 +337,61 @@ def refresh_community_map(jwt):
     save_json(COMMUNITY_MAP_FILE, mapping)
     log(f"✅ Saved {len(mapping)-1} communities to map.")
 
+# ─────────────────────────────────────────────
+# AUTO REFRESH TASK
+# ─────────────────────────────────────────────
+import threading
+
+def start_auto_refresh(jwt):
+    """Background thread to refresh Lemmy community map every few hours."""
+    def loop():
+        reload_sub_map()  # 🔄 Load once immediately
+        refresh_community_map(jwt)
+        while True:
+            try:
+                reload_sub_map()
+                refresh_community_map(jwt)
+            except Exception as e:
+                log(f"⚠️ Auto-refresh failed: {e}")
+            time.sleep(COMMUNITY_REFRESH_HOURS * 3600)
+
 def get_community_id(name: str, jwt: str):
+    """
+    Look up a community by name using Lemmy's direct /api/v3/community?name= endpoint.
+    Automatically refreshes the cached map if needed.
+    """
+    name = name.lower().strip()
+    headers = {"Authorization": f"Bearer {jwt}"}
+
+    # 1️⃣ Direct lookup (most reliable)
+    try:
+        r = requests.get(f"{LEMMY_URL}/api/v3/community", params={"name": name}, headers=headers, timeout=15)
+        if r.ok:
+            data = r.json()
+            if "community_view" in data:
+                cid = data["community_view"]["community"]["id"]
+                # cache result locally for later
+                mapping = load_json(COMMUNITY_MAP_FILE, {})
+                mapping[name] = cid
+                mapping["_fetched_at"] = time.time()
+                save_json(COMMUNITY_MAP_FILE, mapping)
+                log(f"🔎 Found existing Lemmy community: {name} → {cid}")
+                return cid
+        else:
+            log(f"⚠️ Lemmy lookup failed for '{name}': {r.status_code} {r.text[:100]}")
+    except Exception as e:
+        log(f"⚠️ Exception during Lemmy community lookup for {name}: {e}")
+
+    # 2️⃣ Fallback to cached map
     mapping = load_json(COMMUNITY_MAP_FILE, {})
     if not mapping or time.time() - mapping.get("_fetched_at", 0) > COMMUNITY_REFRESH_HOURS * 3600:
         refresh_community_map(jwt)
         mapping = load_json(COMMUNITY_MAP_FILE, {})
+
     for k, v in mapping.items():
-        if k.lower() == name.lower():
+        if k.lower() == name:
             return v
+
     raise RuntimeError(f"community lookup error: could not resolve '{name}' (case-insensitive)")
 
 # ─────────────────────────────────────────────
@@ -608,6 +682,7 @@ def mirror_loop(db: JobDB):
     import praw
 
     jwt = get_valid_token()
+    start_auto_refresh(jwt)
     reddit = praw.Reddit(
         client_id=os.getenv("REDDIT_CLIENT_ID"),
         client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
