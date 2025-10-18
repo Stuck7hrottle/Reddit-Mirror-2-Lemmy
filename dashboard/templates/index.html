@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="bg-gray-800 p-6 rounded-lg shadow text-gray-100">
+  <h2 class="text-2xl font-semibold mb-4">📊 System Status</h2>
+
+<div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">Mirror Status</p>
+    <p class="text-lg font-semibold text-green-400">{{ stats.mirror_status }}</p>
+  </div>
+
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">Posts Queued</p>
+    <p class="text-lg font-semibold">{{ stats.posts_queued }}</p>
+  </div>
+
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">Comments Queued</p>
+    <p class="text-lg font-semibold">{{ stats.comments_queued }}</p>
+  </div>
+
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">✅ Posts Done</p>
+    <p class="text-lg font-semibold text-green-300">{{ stats.posts_done }}</p>
+  </div>
+
+  <!-- 🆕 New metric -->
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">🎬 Videos Uploaded</p>
+    <p class="text-lg font-semibold text-purple-300">{{ stats.videos_uploaded }}</p>
+  </div>
+
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">⏭️ Duplicates Skipped</p>
+    <p class="text-lg font-semibold text-yellow-300">{{ stats.duplicates_skipped }}</p>
+  </div>
+
+  <div class="bg-gray-700 p-3 rounded">
+    <p class="text-sm text-gray-400">🕒 Uptime</p>
+    <p class="text-lg font-semibold">{{ stats.uptime }}</p>
+  </div>
+</div>
+
+  <div class="mt-6 flex justify-between items-center">
+    <a href="/logs" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded shadow">
+      View Logs
+    </a>
+    <a href="/metrics" class="bg-gray-600 hover:bg-gray-500 text-white py-2 px-4 rounded shadow">
+      JSON Metrics
+    </a>
+  </div>
+</div>
+
+{% endblock %}
+
