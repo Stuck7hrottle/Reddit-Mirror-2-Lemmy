@@ -7,6 +7,7 @@ from comment_mirror import mirror_comment_to_lemmy
 
 logger = logging.getLogger(__name__)
 
+
 class MirrorWorker(BaseWorker):
     """Handles Reddit → Lemmy mirroring jobs asynchronously."""
 
@@ -32,7 +33,13 @@ class MirrorWorker(BaseWorker):
 
         logger.info(f"[{self.name}] Mirroring Reddit post {reddit_id}")
         result = await mirror_post_to_lemmy(payload)
-        logger.info(f"[{self.name}] ✅ Mirrored post {reddit_id} → {result}")
+        await asyncio.sleep(10)
+
+        if not result or not result.get("lemmy_id"):
+            logger.warning(f"[{self.name}] ⚠️ Skipped invalid or failed post job (Reddit {reddit_id})")
+        else:
+            logger.info(f"[{self.name}] ✅ Mirrored post {reddit_id} → {result}")
+
         return result
 
     async def _mirror_comment(self, payload):
@@ -52,13 +59,60 @@ class MirrorWorker(BaseWorker):
 # Entry Point
 # ─────────────────────────────────────────────
 if __name__ == "__main__":
-    logger.info("▶️ comment_mirror.py starting (refresh=False)")
+    import signal
+    from utils import write_status
+
+    logger.info("▶️ mirror_worker.py starting (refresh=False)")
+
+    async def monitor_status(worker):
+        """Periodically update dashboard status file."""
+        while worker.active:
+            try:
+                posts_queued = worker.queue.qsize() if hasattr(worker, "queue") else 0
+                comments_queued = posts_queued  # Simplified; same queue
+                write_status("running", posts_queued, comments_queued)
+            except Exception as e:
+                logger.warning(f"[monitor_status] failed: {e}")
+            await asyncio.sleep(30)
 
     async def main():
         worker = MirrorWorker("mirror_worker")
-        await worker.run_forever()  # Uses BaseWorker’s loop
+        logger.info(f"Queue size at start: {worker.queue.qsize()}")
+
+        # --- Load queued jobs from DB on startup
+        from worker_manager import WorkerManager
+        manager = WorkerManager()
+        queued_jobs = manager.load_queued_jobs()
+
+        for job in queued_jobs:
+            await worker.enqueue(job)
+
+        logger.info(f"🔁 Loaded {len(queued_jobs)} queued jobs from DB into worker queue.")
+
+        # --- Graceful shutdown handler
+        stop_event = asyncio.Event()
+
+        def handle_shutdown(*_):
+            if worker.active:
+                logger.warning("🛑 Received shutdown signal — stopping worker gracefully...")
+                worker.stop()
+                write_status("stopping", 0, 0)
+            stop_event.set()
+
+        signal.signal(signal.SIGTERM, handle_shutdown)
+        signal.signal(signal.SIGINT, handle_shutdown)
+
+        await asyncio.gather(
+            worker.start(),
+            monitor_status(worker),
+            stop_event.wait(),
+        )
+
+        write_status("stopped", 0, 0)
+        logger.info("✅ MirrorWorker shut down cleanly.")
 
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("🛑 MirrorWorker stopped manually.")
+        write_status("stopped", 0, 0)

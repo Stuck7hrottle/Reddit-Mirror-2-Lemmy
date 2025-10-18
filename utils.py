@@ -5,6 +5,8 @@ import traceback
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from pathlib import Path
+import psutil
+import time
 
 # ───────────────────────────────
 # Environment Setup
@@ -15,14 +17,54 @@ LEMMY_URL = os.getenv("LEMMY_URL")
 LEMMY_USER = os.getenv("LEMMY_USER")
 LEMMY_PASS = os.getenv("LEMMY_PASS")
 
-DATA_DIR = Path("data")
+# ───────────────────────────────
+# Directory & Lock Setup
+# ───────────────────────────────
+DATA_DIR = Path("/opt/Reddit-Mirror-2-Lemmy/data")
 LOG_DIR = Path("logs")
 TOKEN_PATH = DATA_DIR / "lemmy_token.json"
+TOKEN_LOCK_FILE = DATA_DIR / "login.lock"
 LOG_FILE = LOG_DIR / "bridge.log"
 ERROR_FILE = LOG_DIR / "errors.log"
 
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+def acquire_token_lock(timeout=90):
+    """
+    Prevent concurrent Lemmy logins across multiple processes.
+    Returns True if safe to log in, False if another process logged in recently.
+    """
+    if TOKEN_LOCK_FILE.exists():
+        age = time.time() - TOKEN_LOCK_FILE.stat().st_mtime
+        if age < timeout:
+            print(f"🕒 Recent Lemmy login {age:.0f}s ago — skipping new login.")
+            return False
+    TOKEN_LOCK_FILE.touch()
+    return True
+
+
+# ───────────────────────────────
+# Dashboard Helper
+# ───────────────────────────────
+def write_status(mirror_status="running", posts=0, comments=0):
+    """Write mirror runtime stats to data/state.json for the dashboard."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        status_file = DATA_DIR / "state.json"
+
+        uptime = time.strftime("%H:%M:%S", time.gmtime(time.time() - psutil.boot_time()))
+
+        data = {
+            "mirror_status": mirror_status,
+            "posts_queued": posts,
+            "comments_queued": comments,
+            "uptime": uptime,
+        }
+
+        status_file.write_text(json.dumps(data, indent=2))
+    except Exception as e:
+        log_error("write_status", e)
 
 # ───────────────────────────────
 # Logging Utilities
@@ -53,35 +95,68 @@ def log_error(context: str, exc: Exception):
     with open(ERROR_FILE, "a", encoding="utf-8") as f:
         f.write(line)
 
-
 # ───────────────────────────────
 # Lemmy Authentication Helpers
 # ───────────────────────────────
 def get_valid_token() -> str:
     """
-    Returns a valid Lemmy JWT from cache, refreshing if expired or missing.
+    Returns a valid Lemmy JWT from cache, refreshing only if missing, expired,
+    or clearly invalid. Uses shared file-lock coordination to prevent
+    multiple simultaneous logins across workers.
     """
-    if TOKEN_PATH.exists():
-        try:
+    try:
+        if TOKEN_PATH.exists():
             data = json.loads(TOKEN_PATH.read_text())
             jwt = data.get("jwt")
             expiry = data.get("expires")
-            if jwt and expiry:
-                if datetime.utcnow() < datetime.fromisoformat(expiry):
-                    return jwt
-        except Exception:
-            pass  # Fall through to refresh
 
+            # ✅ If the cached token exists and hasn't expired, reuse it
+            if jwt and expiry and datetime.utcnow() < datetime.fromisoformat(expiry):
+                return jwt
+
+            # 🔄 If token exists but expired within last 2 minutes,
+            #     wait briefly in case another process refreshes it.
+            if jwt and expiry:
+                age_since_expiry = (datetime.utcnow() - datetime.fromisoformat(expiry)).total_seconds()
+                if age_since_expiry < 120 and not acquire_token_lock(timeout=90):
+                    print("🕒 Token just expired — waiting for another process to refresh.")
+                    time.sleep(5)
+                    # Try reading again after short delay
+                    data = json.loads(TOKEN_PATH.read_text())
+                    new_jwt = data.get("jwt")
+                    new_expiry = data.get("expires")
+                    if new_jwt and new_expiry and datetime.utcnow() < datetime.fromisoformat(new_expiry):
+                        print("♻️ Found freshly refreshed token after short wait.")
+                        return new_jwt
+
+    except Exception as e:
+        log_error("get_valid_token", e)
+
+    # 🚀 Fallback: perform real refresh (with internal lock safety)
     return refresh_token()
 
-
 def refresh_token() -> str:
-    """Fetch a new JWT token from Lemmy and cache it locally."""
+    """Fetch a new JWT token from Lemmy and cache it locally (shared + rate-safe)."""
     if not all([LEMMY_URL, LEMMY_USER, LEMMY_PASS]):
         raise RuntimeError("Missing Lemmy credentials in .env")
 
+    # 🧩 Prevent concurrent logins across multiple processes
+    if not acquire_token_lock(timeout=90):
+        # Another process logged in recently — reuse cached token if valid
+        if TOKEN_PATH.exists():
+            try:
+                data = json.loads(TOKEN_PATH.read_text())
+                jwt = data.get("jwt")
+                expiry = data.get("expires")
+                if jwt and expiry and datetime.utcnow() < datetime.fromisoformat(expiry):
+                    print("♻️ Using cached Lemmy token (recent lock detected).")
+                    return jwt
+            except Exception:
+                pass  # if cache invalid, fall through to real login
+
     url = f"{LEMMY_URL}/api/v3/user/login"
     payload = {"username_or_email": LEMMY_USER, "password": LEMMY_PASS}
+
     try:
         r = requests.post(url, json=payload, timeout=30)
         if r.status_code != 200:
@@ -107,7 +182,6 @@ def refresh_token() -> str:
     except Exception as e:
         log_error("refresh_token", e)
         raise
-
 
 # ───────────────────────────────
 # Lemmy API Helpers
