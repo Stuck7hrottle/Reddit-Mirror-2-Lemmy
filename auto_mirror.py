@@ -64,6 +64,7 @@ POST_MAP_FILE = DATA_DIR / "post_map.json"  # legacy JSON (read for migration on
 TOKEN_REUSE_HOURS = 23
 COMMUNITY_REFRESH_HOURS = int(os.getenv("COMMUNITY_REFRESH_HOURS", "6"))
 SLEEP_BETWEEN_CYCLES = int(os.getenv("SLEEP_BETWEEN_CYCLES", "900"))  # 15 min between full cycles
+SUB_MAP_RELOAD_HOURS = int(os.getenv("SUB_MAP_RELOAD_HOURS", str(COMMUNITY_REFRESH_HOURS)))
 
 # ─────────────────────────────────────────────
 # SUBREDDIT → COMMUNITY MAP (boot value; will be hot-reloaded)
@@ -388,10 +389,12 @@ def start_auto_refresh(jwt):
     """
     Quiet background thread:
       - initial: reload_sub_map() + refresh_community_map(jwt)
-      - every COMMUNITY_REFRESH_HOURS: do both again
+      - every SUB_MAP_RELOAD_HOURS: reload_sub_map()
+      - every COMMUNITY_REFRESH_HOURS: refresh_community_map()
     Logs only on changes or errors.
     """
     def loop():
+        last_community_refresh = time.time()
         try:
             reload_sub_map()
             refresh_community_map(jwt)
@@ -400,9 +403,15 @@ def start_auto_refresh(jwt):
 
         while True:
             try:
-                time.sleep(COMMUNITY_REFRESH_HOURS * 3600)
+                # Sleep for the SUB_MAP_RELOAD_HOURS interval
+                time.sleep(SUB_MAP_RELOAD_HOURS * 3600)
                 reload_sub_map()
-                refresh_community_map(jwt)
+
+                # Refresh community map if its interval has passed
+                if time.time() - last_community_refresh >= COMMUNITY_REFRESH_HOURS * 3600:
+                    refresh_community_map(jwt)
+                    last_community_refresh = time.time()
+
             except Exception as e:
                 log(f"⚠️ Auto-refresh cycle error: {e}")
 
