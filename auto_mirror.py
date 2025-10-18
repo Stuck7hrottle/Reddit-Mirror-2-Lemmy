@@ -411,6 +411,12 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
     if len(title) > 180:
         title = title[:177] + "…"
 
+    if not title or len(title) < 3:
+        title = f"Post from r/{subreddit_name} ({datetime.utcnow().strftime('%Y-%m-%d')})"
+
+    # Remove any stray control chars or zero-width spaces
+    title = re.sub(r"[\x00-\x1F\x7F]", "", title)
+
     payload = {"name": title, "community_id": community_id}
     if body_md:
         payload["body"] = body_md
@@ -426,9 +432,15 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
         headers["Authorization"] = f"Bearer {new_jwt}"
         r = requests.post(url, json=payload, headers=headers, timeout=20)
 
+    if "rate_limit_error" in r.text:
+        log("⏳ Lemmy rate-limited post — waiting 30 s and retrying…")
+        time.sleep(30)
+        return create_lemmy_post(subreddit_name, post, jwt, community_id)
+
     if not r.ok:
         raise RuntimeError(f"Lemmy post failed: {r.status_code} {r.text[:200]}")
 
+    time.sleep(10)  # wait 10 seconds between posts to respect rate-limit
     pid = r.json()["post_view"]["post"]["id"]
     log(f"✅ Posted '{post['title']}' (Lemmy ID={pid})")
     return pid
