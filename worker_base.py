@@ -4,6 +4,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict
 from datetime import datetime
+from job_queue import JobDB  # ✅ new import
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class BaseWorker:
         self.queue = asyncio.Queue()
         self.concurrency = concurrency
         self.active = True
+        self.db = JobDB()  # ✅ gives mirror_worker access to fetch_next(), mark_job_status()
 
     async def enqueue(self, job: Job):
         await self.queue.put(job)
@@ -43,24 +45,19 @@ class BaseWorker:
             job = await self.queue.get()
             now = time.time()
 
-            # --- 🩹 Convert string timestamps to float seconds
             if isinstance(job.next_run, str):
                 try:
-                    # Try ISO 8601 first
                     dt = datetime.fromisoformat(job.next_run)
                 except ValueError:
-                    # Fallback to SQLite-style format
                     try:
                         dt = datetime.strptime(job.next_run, "%Y-%m-%d %H:%M:%S")
                     except Exception:
                         dt = datetime.utcnow()
                 job.next_run = dt.timestamp()
 
-            # --- ✅ Ensure non-null next_run
             if not job.next_run:
                 job.next_run = time.time()
 
-            # --- Standard scheduling delay
             if job.next_run > now:
                 await asyncio.sleep(job.next_run - now)
 

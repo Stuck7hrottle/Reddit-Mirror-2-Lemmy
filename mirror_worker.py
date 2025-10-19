@@ -10,13 +10,13 @@ import asyncio
 import logging
 from datetime import datetime
 from job_queue import JobDB
-from worker_base import WorkerBase
+from worker_base import BaseWorker
 from core.bridge_registry import BridgeRegistry
 
 logger = logging.getLogger(__name__)
 
 
-class MirrorWorker(WorkerBase):
+class MirrorWorker(BaseWorker):
     """Worker that executes mirror_post jobs using dynamic bridge lookup."""
 
     async def handle_job(self, job):
@@ -45,7 +45,7 @@ class MirrorWorker(WorkerBase):
 async def main():
     logger.info("🚀 Starting MirrorWorker (multi-source bridge mode)")
     db = JobDB()
-    worker = MirrorWorker(db=db, job_type="mirror_post")
+    worker = MirrorWorker("mirror_worker")
 
     while True:
         job = worker.db.fetch_next("mirror_post")
