@@ -4,7 +4,6 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Dict
 from datetime import datetime
-from job_queue import JobDB  # ✅ new import
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +18,7 @@ class Job:
 
 class BaseWorker:
     def __init__(self, name: str, concurrency: int = 2):
+        from job_queue import JobDB
         self.name = name
         self.queue = asyncio.Queue()
         self.concurrency = concurrency
