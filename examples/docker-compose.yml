@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   reddit-mirror:
     build: .
@@ -61,6 +59,47 @@ services:
         # Uncomment below if you want to connect to your Lemmy-Ansible Docker network
     #networks:
     #  - your_lemmy_network
+
+  lemmy_comment_sync:
+    build: .
+    container_name: lemmy_comment_sync
+    restart: unless-stopped
+    environment:
+      - LEMMY_URL=${LEMMY_URL}
+      - LEMMY_USER=${LEMMY_USER}
+      - LEMMY_PASS=${LEMMY_PASS}
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT}
+      - DATA_DIR=/opt/Reddit-Mirror-2-Lemmy/data
+      - LEMMY_COMMENT_SYNC_INTERVAL=${LEMMY_COMMENT_SYNC_INTERVAL}
+      - LEMMY_COMMENT_FETCH_LIMIT=${LEMMY_COMMENT_FETCH_LIMIT}
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+    depends_on:
+      - reddit-mirror
+
+  reddit_comment_sync:
+    build: .
+    container_name: reddit_comment_sync
+    restart: unless-stopped
+    environment:
+      - LEMMY_URL=${LEMMY_URL}
+      - LEMMY_USER=${LEMMY_USER}
+      - LEMMY_PASS=${LEMMY_PASS}
+      - REDDIT_CLIENT_ID=${REDDIT_CLIENT_ID}
+      - REDDIT_CLIENT_SECRET=${REDDIT_CLIENT_SECRET}
+      - REDDIT_USERNAME=${REDDIT_USERNAME}
+      - REDDIT_PASSWORD=${REDDIT_PASSWORD}
+      - REDDIT_USER_AGENT=${REDDIT_USER_AGENT}
+      - DATA_DIR=/opt/Reddit-Mirror-2-Lemmy/data
+      - REDDIT_COMMENT_SYNC_INTERVAL=${REDDIT_COMMENT_SYNC_INTERVAL}
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+    depends_on:
+      - reddit-mirror
 
 #Optional internal network connection to Lemmy
 #networks:

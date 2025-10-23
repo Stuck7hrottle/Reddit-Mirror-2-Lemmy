@@ -3,10 +3,21 @@ import asyncio
 import logging
 from worker_base import BaseWorker
 from auto_mirror import mirror_post_to_lemmy
-from comment_mirror import mirror_comment_to_lemmy
+#from comment_mirror import mirror_comment_to_lemmy
+from lemmy_comment_sync import mirror_lemmy_comments_to_reddit
+from reddit_comment_sync import mirror_new_reddit_replies
 
 logger = logging.getLogger(__name__)
 
+class RedditCommentWorker(BaseWorker):
+    def process_job(self, job):
+        mirror_new_reddit_replies()
+        return "done"
+
+class LemmyCommentWorker(BaseWorker):
+    def process_job(self, job):
+        mirror_lemmy_comments_to_reddit()
+        return "done"
 
 class MirrorWorker(BaseWorker):
     """Handles Reddit → Lemmy mirroring jobs asynchronously."""
@@ -19,7 +30,8 @@ class MirrorWorker(BaseWorker):
             if job_type == "mirror_post":
                 await self._mirror_post(payload)
             elif job_type == "mirror_comment":
-                await self._mirror_comment(payload)
+                logger.info(f"[{self.name}] Skipping legacy mirror_comment job (handled by reddit_comment_sync now)")
+                return "skipped"
             else:
                 logger.warning(f"[{self.name}] Unknown job type: {job_type}")
         except Exception as e:
@@ -42,17 +54,18 @@ class MirrorWorker(BaseWorker):
 
         return result
 
-    async def _mirror_comment(self, payload):
-        reddit_post_id = payload.get("reddit_post_id") or payload.get("reddit_id")
-        lemmy_post_id = payload.get("lemmy_post_id")
-
-        if not reddit_post_id or not lemmy_post_id:
-            logger.warning(f"⚠️ Incomplete payload for comment job: {payload}")
-            return None
-
-        result = await mirror_comment_to_lemmy(payload)
-        logger.info(f"[{self.name}] ✅ Mirrored comments for {reddit_post_id} → Lemmy {lemmy_post_id}")
-        return result
+#    Commenting Out For Now As We Use Two New Services
+#    async def _mirror_comment(self, payload):
+#        reddit_post_id = payload.get("reddit_post_id") or payload.get("reddit_id")
+#        lemmy_post_id = payload.get("lemmy_post_id")
+#
+#       if not reddit_post_id or not lemmy_post_id:
+#            logger.warning(f"⚠️ Incomplete payload for comment job: {payload}")
+#            return None
+#
+#        result = await mirror_comment_to_lemmy(payload)
+#        logger.info(f"[{self.name}] ✅ Mirrored comments for {reddit_post_id} → Lemmy {lemmy_post_id}")
+#        return result
 
 
 # ─────────────────────────────────────────────

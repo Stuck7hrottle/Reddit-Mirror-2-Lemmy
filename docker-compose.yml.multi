@@ -1,0 +1,74 @@
+version: "3.9"
+
+services:
+  # 🧱 Core worker for posts
+  mirror-worker:
+    build: .
+    container_name: mirror_worker
+    command: python3 mirror_worker.py       # 👈 NEW
+    restart: always
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+    env_file:
+      - .env
+    depends_on:
+      - reddit-refresh                      # 👈 optional
+    networks:
+      - fosscadguncaddesignscom_default
+
+  # 🧱 Separate worker for comments
+  comment-worker:
+    build: .
+    container_name: comment_worker
+    command: python3 comment_worker.py      # 👈 NEW
+    restart: always
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+    env_file:
+      - .env
+    depends_on:
+      - mirror-worker
+    networks:
+      - fosscadguncaddesignscom_default
+
+  # 🔁 Existing refresh service (keep for now)
+  reddit-refresh:
+    build: .
+    container_name: reddit_mirror_refresh
+    command: >
+      bash -c "
+        while true; do
+          echo '🔁 Running refresh cycle...';
+          python3 auto_mirror.py --refresh;    # 👈 still valid for cache/token refresh
+          echo '⏳ Sleeping for ${REFRESH_INTERVAL:-3600} seconds...';
+          sleep ${REFRESH_INTERVAL:-3600};
+        done
+      "
+    restart: always
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+      - ./.env:/opt/Reddit-Mirror-2-Lemmy/.env:ro
+    env_file:
+      - .env
+    networks:
+      - fosscadguncaddesignscom_default
+
+  # 🌐 Dashboard stays identical
+  mirror-dashboard:
+    build:
+      context: ./dashboard
+    container_name: mirror-dashboard
+    ports:
+      - "8080:8080"
+    environment:
+      - DATA_DIR=/opt/Reddit-Mirror-2-Lemmy/data
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+      - ./dashboard/static:/app/static
+    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+    networks:
+      - fosscadguncaddesignscom_default
+
+networks:
+  fosscadguncaddesignscom_default:
+    external: true

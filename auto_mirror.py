@@ -240,14 +240,20 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
                 if isinstance(meta.get("s"), dict):
                     s = meta["s"]
                     src = s.get("u") or s.get("gif") or s.get("mp4")
+                # ✅ fallback to preview list if "s" missing
                 if not src and isinstance(meta.get("p"), list) and meta["p"]:
                     src = meta["p"][-1].get("u")
+                # ✅ sanitize and stabilize Reddit image links
+                if src:
+                    src = src.replace("&amp;", "&").split("?")[0]
+                    if "preview.redd.it" in src:
+                        src = src.replace("preview.redd.it", "i.redd.it")
                 caption = it.get("caption") or ""
                 if src:
                     cap = f" — {md_escape(caption)}" if caption else ""
                     media_lines.append(f"![Image {idx}]({src}){cap}")
-        except Exception:
-            pass
+        except Exception as e:
+            log(f"⚠️ gallery parse failed: {e}")
 
     # Single image / imgur
     url = _get(sub, "url", "") or ""
@@ -259,6 +265,9 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
             if guess:
                 img = guess
         if img:
+            img = img.replace("&amp;", "&").split("?")[0]
+            if "preview.redd.it" in img:
+                img = img.replace("preview.redd.it", "i.redd.it")
             media_lines.append(f"![Image]({img})")
 
     # Reddit hosted video (link out)
@@ -792,7 +801,23 @@ async def mirror_post_to_lemmy(payload: dict):
     db = DB()
     post_data = fetch_reddit_submission(reddit_id)
     if not post_data:
-        raise RuntimeError(f"Failed to fetch Reddit submission {reddit_id}")
+        # Gracefully skip missing/deleted/private Reddit posts
+        from pathlib import Path as _Path
+        import sqlite3, json
+        db_path = _Path(__file__).parent / "data" / "jobs.db"
+        try:
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                "UPDATE jobs SET status='skipped', updated_at=datetime('now') "
+                "WHERE type='mirror_post' AND json_extract(payload, '$.reddit_post_id') = ?",
+                (reddit_id,),
+            )
+            conn.commit()
+            conn.close()
+            log(f"🚫 Skipping missing Reddit post {reddit_id} — marked as skipped in DB.")
+        except Exception as e:
+            log(f"⚠️ Failed to mark missing post {reddit_id} as skipped: {e}")
+        return {"lemmy_id": None}
 
     jwt = get_valid_token()
     subreddit = post_data.get("subreddit")
@@ -875,11 +900,24 @@ def mirror_once(subreddit_name: str, test_mode: bool = False):
 
         url = f"https://www.reddit.com/r/{subreddit_name}/new.json"
         headers = {"User-Agent": "RedditToLemmyBridge/1.1 (by u/YourBotName)"}
-        r = requests.get(url, params=params, headers=headers, timeout=20)
+        # --- enhanced rate-limit handling ---
+        for attempt in range(5):
+            r = requests.get(url, params=params, headers=headers, timeout=20)
 
-        if not r.ok:
-            print(f"⚠️ Reddit API error {r.status_code} for r/{subreddit_name}")
+            if r.status_code == 429:
+                retry_after = int(r.headers.get("Retry-After", "10"))
+                wait = min(retry_after, 60)  # cap at 1 min
+                print(f"⚠️ Reddit API rate-limited r/{subreddit_name} — waiting {wait}s before retry ({attempt+1}/5)…")
+                time.sleep(wait)
+                continue
+
+            if not r.ok:
+                print(f"⚠️ Reddit API error {r.status_code} for r/{subreddit_name}")
+                break
+
+            # success, exit retry loop
             break
+        # --- end patch ---
 
         data = r.json().get("data", {})
         children = data.get("children", [])
@@ -953,7 +991,10 @@ def mirror_loop(db: JobDB):
                 log(f"⚠️ Error while mirroring r/{reddit_sub} → c/{lemmy_comm}: {e}")
 
         log(f"🕒 Sleeping {SLEEP_BETWEEN_CYCLES}s…")
-        time.sleep(SLEEP_BETWEEN_CYCLES)
+        import random
+        jitter = random.randint(-60, 60)
+        time.sleep(max(60, SLEEP_BETWEEN_CYCLES + jitter))
+
 
 # ─────────────────────────────────────────────
 # CLI: update-existing

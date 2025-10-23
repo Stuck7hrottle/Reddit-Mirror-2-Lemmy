@@ -3,19 +3,18 @@ import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any
-
 import os
 
-# Use DATA_DIR for container-friendly persistence (defaults to /app/data)
+# Use DATA_DIR for container-friendly persistence
 DATA_DIR = Path(os.getenv("DATA_DIR", "/app/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
-DB_PATH = DATA_DIR / "bridge_cache.db"
+DB_PATH = Path("/opt/Reddit-Mirror-2-Lemmy/data/jobs.db")
 
 
 class DB:
     """
-    Lightweight SQLite cache for Reddit → Lemmy bridge.
-    Thread-safe, minimal dependencies, and auto-creates tables.
+    Lightweight SQLite cache for Reddit ↔ Lemmy bridge.
+    Thread-safe and automatically migrates schema for new fields.
     """
 
     _lock = threading.Lock()
@@ -27,93 +26,101 @@ class DB:
     def _get_conn(self):
         """Return a new SQLite connection with foreign keys enabled."""
         conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON;")
         return conn
 
+    # ─────────────────────────────── DB Initialization ─────────────────────────────── #
     def _init_db(self):
-        """Initialize tables if they don't exist."""
+        """Ensure tables exist (safe for repeated initialization)."""
         with self._get_conn() as conn, conn:
-            conn.execute(
-                """
+            # posts table
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS posts (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     reddit_id TEXT UNIQUE,
                     lemmy_id TEXT,
                     subreddit TEXT,
+                    source TEXT DEFAULT 'reddit',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                """
-            )
-            conn.execute(
-                """
+            """)
+
+            # comments table
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS comments (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     reddit_id TEXT UNIQUE,
                     lemmy_id TEXT,
                     parent_reddit_id TEXT,
                     parent_lemmy_id TEXT,
+                    source TEXT DEFAULT 'reddit',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     last_synced TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                """
-            )
+            """)
 
-    # ─────────────────────────────── Posts ─────────────────────────────── #
+            # db_meta table (for version flags)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS db_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
-    def save_post(self, reddit_id: str, lemmy_id: str, subreddit: Optional[str] = None) -> None:
+    # ─────────────────────────────── Post Helpers ─────────────────────────────── #
+    def save_post(self, reddit_id: str, lemmy_id: str, subreddit: str = "", source="reddit"):
         with self._lock, self._get_conn() as conn, conn:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO posts (reddit_id, lemmy_id, subreddit, last_synced)
-                VALUES (?, ?, ?, ?);
-                """,
-                (reddit_id, lemmy_id, subreddit, datetime.utcnow()),
-            )
+            conn.execute("""
+                INSERT OR REPLACE INTO posts (reddit_id, lemmy_id, subreddit, source, last_synced)
+                VALUES (?, ?, ?, ?, ?)
+            """, (reddit_id, lemmy_id, subreddit, source, datetime.utcnow()))
 
     def get_lemmy_post_id(self, reddit_id: str) -> Optional[str]:
         with self._lock, self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT lemmy_id FROM posts WHERE reddit_id = ?;", (reddit_id,)
-            ).fetchone()
-            return row[0] if row else None
+            row = conn.execute("SELECT lemmy_id FROM posts WHERE reddit_id = ?;", (reddit_id,)).fetchone()
+            return row["lemmy_id"] if row else None
 
-    # ─────────────────────────────── Comments ─────────────────────────────── #
+    def get_reddit_post_id(self, lemmy_id: str) -> Optional[str]:
+        with self._lock, self._get_conn() as conn:
+            row = conn.execute("SELECT reddit_id FROM posts WHERE lemmy_id = ?;", (lemmy_id,)).fetchone()
+            return row["reddit_id"] if row else None
 
+    # ─────────────────────────────── Comment Helpers ─────────────────────────────── #
     def save_comment(
         self,
         reddit_id: str,
         lemmy_id: str,
         parent_reddit_id: Optional[str] = None,
         parent_lemmy_id: Optional[str] = None,
-    ) -> None:
+        source: str = "reddit",
+    ):
         with self._lock, self._get_conn() as conn, conn:
-            conn.execute(
-                """
+            conn.execute("""
                 INSERT OR REPLACE INTO comments
-                (reddit_id, lemmy_id, parent_reddit_id, parent_lemmy_id, last_synced)
-                VALUES (?, ?, ?, ?, ?);
-                """,
-                (reddit_id, lemmy_id, parent_reddit_id, parent_lemmy_id, datetime.utcnow()),
-            )
+                (reddit_id, lemmy_id, parent_reddit_id, parent_lemmy_id, source, last_synced)
+                VALUES (?, ?, ?, ?, ?, ?);
+            """, (reddit_id, lemmy_id, parent_reddit_id, parent_lemmy_id, source, datetime.utcnow()))
 
     def get_lemmy_comment_id(self, reddit_id: str) -> Optional[str]:
         with self._lock, self._get_conn() as conn:
-            row = conn.execute(
-                "SELECT lemmy_id FROM comments WHERE reddit_id = ?;", (reddit_id,)
-            ).fetchone()
-            return row[0] if row else None
+            row = conn.execute("SELECT lemmy_id FROM comments WHERE reddit_id = ?;", (reddit_id,)).fetchone()
+            return row["lemmy_id"] if row else None
 
-    # ─────────────────────────────── Maintenance / Stats ────────────────── #
+    def get_reddit_comment_id(self, lemmy_id: str) -> Optional[str]:
+        with self._lock, self._get_conn() as conn:
+            row = conn.execute("SELECT reddit_id FROM comments WHERE lemmy_id = ?;", (lemmy_id,)).fetchone()
+            return row["reddit_id"] if row else None
 
+    # ─────────────────────────────── Maintenance / Stats ─────────────────────────────── #
     def purge_old(self, days: int = 30) -> int:
-        """Delete entries older than N days. Returns total rows deleted."""
+        """Delete entries older than N days."""
         cutoff = datetime.utcnow().timestamp() - (days * 86400)
         with self._lock, self._get_conn() as conn, conn:
-            c1 = conn.execute(
-                "DELETE FROM posts WHERE strftime('%s', last_synced) < ?;", (cutoff,)
-            ).rowcount
-            c2 = conn.execute(
-                "DELETE FROM comments WHERE strftime('%s', last_synced) < ?;", (cutoff,)
-            ).rowcount
+            c1 = conn.execute("DELETE FROM posts WHERE strftime('%s', last_synced) < ?;", (cutoff,)).rowcount
+            c2 = conn.execute("DELETE FROM comments WHERE strftime('%s', last_synced) < ?;", (cutoff,)).rowcount
             return c1 + c2
 
     def get_stats(self) -> Dict[str, Any]:
@@ -126,6 +133,6 @@ class DB:
 
 if __name__ == "__main__":
     db = DB()
-    db.save_post("r_demo", "l_123", "testsub")
-    db.save_comment("c_demo", "lc_1", "r_demo", "l_123")
+    db.save_post("r_demo", "l_123", "testsub", source="reddit")
+    db.save_comment("c_demo", "lc_1", "r_demo", "l_123", source="lemmy")
     print(db.get_stats())

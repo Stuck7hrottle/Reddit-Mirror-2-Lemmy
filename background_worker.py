@@ -7,6 +7,10 @@ from worker_manager import WorkerManager
 from mirror_worker import MirrorWorker
 from job_queue import manager  # shared global manager
 from utils import write_status
+from mirror_worker import LemmyCommentWorker, RedditCommentWorker
+
+manager.register_worker("mirror_lemmy_comment", LemmyCommentWorker("mirror_lemmy_comment"))
+manager.register_worker("mirror_reddit_comment", RedditCommentWorker("mirror_reddit_comment"))
 
 # ───────────────────────────────
 # Override write_status for dashboard (state.json compatibility)

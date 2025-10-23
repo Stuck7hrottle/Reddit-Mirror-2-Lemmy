@@ -30,6 +30,7 @@ ERROR_FILE = LOG_DIR / "errors.log"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+
 def acquire_token_lock(timeout=90):
     """
     Prevent concurrent Lemmy logins across multiple processes.
@@ -66,6 +67,7 @@ def write_status(mirror_status="running", posts=0, comments=0):
     except Exception as e:
         log_error("write_status", e)
 
+
 # ───────────────────────────────
 # Logging Utilities
 # ───────────────────────────────
@@ -95,93 +97,116 @@ def log_error(context: str, exc: Exception):
     with open(ERROR_FILE, "a", encoding="utf-8") as f:
         f.write(line)
 
+
 # ───────────────────────────────
 # Lemmy Authentication Helpers
 # ───────────────────────────────
-def get_valid_token() -> str:
+def get_valid_token(username: str = None, password: str = None, force: bool = False) -> str:
     """
-    Returns a valid Lemmy JWT from cache, refreshing only if missing, expired,
-    or clearly invalid. Uses shared file-lock coordination to prevent
-    multiple simultaneous logins across workers.
+    Returns a valid Lemmy JWT from cache, refreshing only if missing or expired.
+    You can override credentials with username/password for multi-user setups.
     """
+    user = username or LEMMY_USER
+    pwd = password or LEMMY_PASS
+
+    if not all([LEMMY_URL, user, pwd]):
+        raise RuntimeError("Missing Lemmy credentials (.env or override)")
+
+    # Token file per user (so mirrorbot and mirrorcomments each get their own)
+    user_safe = user.replace("@", "_").replace(".", "_")
+    token_file = DATA_DIR / f"lemmy_token_{user_safe}.json"
+
     try:
-        if TOKEN_PATH.exists():
-            data = json.loads(TOKEN_PATH.read_text())
+        if not force and token_file.exists():
+            data = json.loads(token_file.read_text())
             jwt = data.get("jwt")
             expiry = data.get("expires")
 
-            # ✅ If the cached token exists and hasn't expired, reuse it
+            # ✅ Reuse unexpired token
             if jwt and expiry and datetime.utcnow() < datetime.fromisoformat(expiry):
                 return jwt
 
-            # 🔄 If token exists but expired within last 2 minutes,
-            #     wait briefly in case another process refreshes it.
+            # ⏳ If expired very recently, wait for another process to refresh it
             if jwt and expiry:
-                age_since_expiry = (datetime.utcnow() - datetime.fromisoformat(expiry)).total_seconds()
-                if age_since_expiry < 120 and not acquire_token_lock(timeout=90):
-                    print("🕒 Token just expired — waiting for another process to refresh.")
+                age = (datetime.utcnow() - datetime.fromisoformat(expiry)).total_seconds()
+                if age < 120 and not acquire_token_lock(timeout=90):
+                    print("🕒 Token recently expired — waiting for another process to refresh it.")
                     time.sleep(5)
-                    # Try reading again after short delay
-                    data = json.loads(TOKEN_PATH.read_text())
-                    new_jwt = data.get("jwt")
-                    new_expiry = data.get("expires")
-                    if new_jwt and new_expiry and datetime.utcnow() < datetime.fromisoformat(new_expiry):
-                        print("♻️ Found freshly refreshed token after short wait.")
-                        return new_jwt
-
+                    try:
+                        data = json.loads(token_file.read_text())
+                        new_jwt = data.get("jwt")
+                        new_expiry = data.get("expires")
+                        if new_jwt and new_expiry and datetime.utcnow() < datetime.fromisoformat(new_expiry):
+                            print("♻️ Found freshly refreshed token after wait.")
+                            return new_jwt
+                    except Exception:
+                        pass
     except Exception as e:
         log_error("get_valid_token", e)
 
-    # 🚀 Fallback: perform real refresh (with internal lock safety)
-    return refresh_token()
+    # 🚀 Fallback: perform real refresh
+    return refresh_token(username=user, password=pwd, token_file=token_file)
 
-def refresh_token() -> str:
-    """Fetch a new JWT token from Lemmy and cache it locally (shared + rate-safe)."""
-    if not all([LEMMY_URL, LEMMY_USER, LEMMY_PASS]):
-        raise RuntimeError("Missing Lemmy credentials in .env")
 
-    # 🧩 Prevent concurrent logins across multiple processes
+def refresh_token(username: str = None, password: str = None, token_file: Path = None) -> str:
+    """Fetch a new JWT token from Lemmy and cache it locally (per-user, shared + rate-safe)."""
+    user = username or LEMMY_USER
+    pwd = password or LEMMY_PASS
+    token_file = token_file or (DATA_DIR / "lemmy_token.json")
+
+    if not all([LEMMY_URL, user, pwd]):
+        raise RuntimeError("Missing Lemmy credentials for refresh_token")
+
     if not acquire_token_lock(timeout=90):
-        # Another process logged in recently — reuse cached token if valid
-        if TOKEN_PATH.exists():
+        # Another process logged in recently — reuse cache if possible
+        if token_file.exists():
             try:
-                data = json.loads(TOKEN_PATH.read_text())
+                data = json.loads(token_file.read_text())
                 jwt = data.get("jwt")
                 expiry = data.get("expires")
                 if jwt and expiry and datetime.utcnow() < datetime.fromisoformat(expiry):
-                    print("♻️ Using cached Lemmy token (recent lock detected).")
+                    print("♻️ Using cached Lemmy token (recent login detected).")
                     return jwt
             except Exception:
-                pass  # if cache invalid, fall through to real login
+                pass
 
     url = f"{LEMMY_URL}/api/v3/user/login"
-    payload = {"username_or_email": LEMMY_USER, "password": LEMMY_PASS}
+    payload = {"username_or_email": user, "password": pwd}
 
-    try:
-        r = requests.post(url, json=payload, timeout=30)
-        if r.status_code != 200:
-            raise RuntimeError(f"Lemmy login failed: {r.status_code} {r.text}")
+    for attempt in range(1, 6):
+        try:
+            r = requests.post(url, json=payload, timeout=30)
+            if r.status_code == 429 or "rate_limit_error" in r.text:
+                wait_time = 15 * attempt
+                print(f"⚠️ Lemmy rate limit hit, waiting {wait_time}s...")
+                time.sleep(wait_time)
+                continue
 
-        data = r.json()
-        jwt = data.get("jwt")
-        if not jwt:
-            raise RuntimeError("Lemmy returned no JWT")
+            if r.status_code != 200:
+                raise RuntimeError(f"Lemmy login failed: {r.status_code} {r.text}")
 
-        TOKEN_PATH.write_text(
-            json.dumps(
-                {
-                    "jwt": jwt,
-                    "expires": (datetime.utcnow() + timedelta(hours=4)).isoformat(),
-                },
-                indent=2,
+            data = r.json()
+            jwt = data.get("jwt")
+            if not jwt:
+                raise RuntimeError("Lemmy returned no JWT")
+
+            token_file.write_text(
+                json.dumps(
+                    {
+                        "jwt": jwt,
+                        "expires": (datetime.utcnow() + timedelta(hours=4)).isoformat(),
+                    },
+                    indent=2,
+                )
             )
-        )
-        log("🔑 Refreshed Lemmy token")
-        return jwt
+            log(f"🔑 Refreshed Lemmy token for {user}")
+            return jwt
 
-    except Exception as e:
-        log_error("refresh_token", e)
-        raise
+        except Exception as e:
+            log_error("refresh_token", e)
+            time.sleep(3)
+
+    raise RuntimeError(f"Lemmy login failed for {user} after multiple attempts")
 
 # ───────────────────────────────
 # Lemmy API Helpers
@@ -190,7 +215,12 @@ def get_community_id(community_name: str, jwt: str) -> int:
     """Return Lemmy community ID by name."""
     url = f"{LEMMY_URL}/api/v3/community"
     try:
-        r = requests.get(url, params={"name": community_name}, headers={"Authorization": f"Bearer {jwt}"}, timeout=30)
+        r = requests.get(
+            url,
+            params={"name": community_name},
+            headers={"Authorization": f"Bearer {jwt}"},
+            timeout=30,
+        )
         if r.status_code != 200:
             raise RuntimeError(f"Failed to fetch community: {r.status_code} {r.text}")
 
@@ -204,24 +234,17 @@ def create_lemmy_post(subreddit: str, post_data: dict, jwt: str, community_id: i
     """Create a new Lemmy post from Reddit submission data."""
     url = f"{LEMMY_URL}/api/v3/post"
 
-    # Build Lemmy post body: default to text post, not link post
     body = {
         "name": post_data.get("title", "[untitled]"),
         "body": post_data.get("selftext", "") or "",
         "community_id": community_id,
     }
 
-    # Only include 'url' if you explicitly want a link-style post
     if post_data.get("force_link") and post_data.get("url"):
         body["url"] = post_data["url"]
 
     try:
-        r = requests.post(
-            url,
-            json=body,
-            headers={"Authorization": f"Bearer {jwt}"},
-            timeout=30,
-        )
+        r = requests.post(url, json=body, headers={"Authorization": f"Bearer {jwt}"}, timeout=30)
         if r.status_code != 200:
             raise RuntimeError(f"Post creation failed: {r.status_code} {r.text}")
 
