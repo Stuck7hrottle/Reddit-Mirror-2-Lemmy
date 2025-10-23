@@ -803,7 +803,6 @@ async def mirror_post_to_lemmy(payload: dict):
     if not post_data:
         # Gracefully skip missing/deleted/private Reddit posts
         from pathlib import Path as _Path
-        import sqlite3, json
         db_path = _Path(__file__).parent / "data" / "jobs.db"
         try:
             conn = sqlite3.connect(db_path)

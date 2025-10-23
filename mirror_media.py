@@ -176,11 +176,20 @@ def mirror_url(url: str) -> str | None:
         headers = {"Authorization": f"Bearer {jwt}"} if jwt else {}
 
         upload_url = f"{LEMMY_URL}/pictrs/image"
-        files = {"image": ("upload.jpg", data)}
-        res = requests.post(upload_url, files=files, headers=headers, timeout=30)
 
-        if not res.ok:
-            log(f"⚠️ Upload failed {res.status_code}: {res.text[:150]}")
+        # Try all known compatible field names for Lemmy pictrs
+        res = None
+        field_names = ("images[]", "images", "file", "image")
+        for key in field_names:
+            files = {key: ("upload.jpg", data, "image/jpeg")}
+            res = requests.post(upload_url, files=files, headers=headers, timeout=30)
+            if res.ok:
+                break
+            else:
+                log(f"⚠️ Upload attempt failed with field '{key}' → {res.status_code}: {res.text[:80]}")
+
+        if not res or not res.ok:
+            log(f"⚠️ Upload failed {getattr(res, 'status_code', '?')}: {getattr(res, 'text', '')[:150]}")
             return None
 
         payload = res.json()
@@ -193,6 +202,7 @@ def mirror_url(url: str) -> str | None:
         if file_id:
             mirrored = f"{LEMMY_URL}/pictrs/image/{file_id}"
             _cache_set(url, mirrored)
+            log(f"📸 Uploaded → {mirrored}")
             return mirrored
 
     except Exception as e:

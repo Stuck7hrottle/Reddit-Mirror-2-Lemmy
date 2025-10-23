@@ -70,6 +70,15 @@ class DB:
                 );
             """)
 
+            # ignored_posts table (for permanently skipped Reddit posts)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ignored_posts (
+                    reddit_id TEXT PRIMARY KEY,
+                    reason TEXT DEFAULT 'forbidden',
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+
     # ─────────────────────────────── Post Helpers ─────────────────────────────── #
     def save_post(self, reddit_id: str, lemmy_id: str, subreddit: str = "", source="reddit"):
         with self._lock, self._get_conn() as conn, conn:
@@ -87,6 +96,27 @@ class DB:
         with self._lock, self._get_conn() as conn:
             row = conn.execute("SELECT reddit_id FROM posts WHERE lemmy_id = ?;", (lemmy_id,)).fetchone()
             return row["reddit_id"] if row else None
+
+    # ─────────────────────────────── Ignored Post Helpers ─────────────────────────────── #
+    def mark_post_ignored(self, reddit_id: str, reason: str = "forbidden"):
+        """Mark a Reddit post as permanently ignored (deleted/forbidden)."""
+        with self._lock, self._get_conn() as conn, conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO ignored_posts (reddit_id, reason, created_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP);
+            """, (reddit_id, reason))
+
+    def is_post_ignored(self, reddit_id: str) -> bool:
+        """Return True if a Reddit post is permanently ignored."""
+        with self._lock, self._get_conn() as conn:
+            row = conn.execute("SELECT 1 FROM ignored_posts WHERE reddit_id = ?;", (reddit_id,)).fetchone()
+            return bool(row)
+
+    def get_ignored_posts(self) -> list[str]:
+        """Return a list of all permanently ignored Reddit post IDs."""
+        with self._lock, self._get_conn() as conn:
+            rows = conn.execute("SELECT reddit_id FROM ignored_posts;").fetchall()
+            return [r["reddit_id"] for r in rows]
 
     # ─────────────────────────────── Comment Helpers ─────────────────────────────── #
     def save_comment(

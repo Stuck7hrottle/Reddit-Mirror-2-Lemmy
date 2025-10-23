@@ -65,12 +65,7 @@ def format_reddit_comment_body(comment):
 
 def mirror_new_reddit_replies(force_backfill=False):
     db = DB()
-    jwt = get_valid_token(
-        username=os.getenv("LEMMY_COMMENT_USER", os.getenv("LEMMY_USER")),
-        password=os.getenv("LEMMY_COMMENT_PASS", os.getenv("LEMMY_PASS")),
-    )
     reddit = create_reddit_client()
-    headers = {"Authorization": f"Bearer {jwt}"}
 
     # Load mirrored posts map (Reddit↔Lemmy)
     try:
@@ -81,11 +76,35 @@ def mirror_new_reddit_replies(force_backfill=False):
         log_error("reddit_comment_sync.load_posts", e)
         return
 
+    # Use DB-based ignored posts tracking
+    ignored_posts = set(db.get_ignored_posts())
+
     for reddit_post_id, lemmy_post_id in mirrored_posts:
+        # 🔒 Skip permanently ignored posts
+        if reddit_post_id in ignored_posts:
+            log(f"🚫 Permanently ignoring previously skipped post {reddit_post_id}")
+            continue
+
+        # 💡 Fetch a fresh JWT at the start of every batch
+        jwt = get_valid_token(
+            username=os.getenv("LEMMY_COMMENT_USER", os.getenv("LEMMY_USER")),
+            password=os.getenv("LEMMY_COMMENT_PASS", os.getenv("LEMMY_PASS")),
+        )
+        headers = {"Authorization": f"Bearer {jwt}"}
+
         try:
             submission = reddit.submission(id=reddit_post_id)
-            submission.comments.replace_more(limit=None)
-            comments = submission.comments.list()
+            try:
+                submission.comments.replace_more(limit=None)
+                comments = submission.comments.list()
+            except Exception as e:
+                # Gracefully handle forbidden/deleted/private posts
+                if "403" in str(e) or "forbidden" in str(e).lower():
+                    log(f"⚠️ Skipping Reddit post {reddit_post_id} — access forbidden or removed.")
+                    db.mark_post_ignored(reddit_post_id, reason="forbidden")
+                    continue
+                log_error("reddit_comment_sync.fetch_comments", e)
+                continue
 
             for rc in comments:
                 # Skip bot's own Reddit comments to avoid loops
@@ -100,7 +119,7 @@ def mirror_new_reddit_replies(force_backfill=False):
                     continue
 
                 formatted = format_reddit_comment_body(rc)
-                if not formatted:
+                if not formatted or len(formatted.strip()) < 3:
                     continue
 
                 payload = {"content": formatted, "post_id": int(lemmy_post_id)}
@@ -122,19 +141,37 @@ def mirror_new_reddit_replies(force_backfill=False):
                     r = requests.post(
                         f"{LEMMY_URL}/api/v3/comment",
                         json=payload,
-                        headers={"Authorization": f"Bearer {jwt}"},
+                        headers=headers,
                         timeout=20,
                     )
+
+                    # 🔄 Refresh on 401
                     if r.status_code == 401:
-                        # refresh token once
                         jwt = get_valid_token(
                             username=os.getenv("LEMMY_COMMENT_USER", os.getenv("LEMMY_USER")),
                             password=os.getenv("LEMMY_COMMENT_PASS", os.getenv("LEMMY_PASS")),
                         )
+                        headers = {"Authorization": f"Bearer {jwt}"}
                         r = requests.post(
                             f"{LEMMY_URL}/api/v3/comment",
                             json=payload,
-                            headers={"Authorization": f"Bearer {jwt}"},
+                            headers=headers,
+                            timeout=20,
+                        )
+
+                    # 🧩 Retry once if Lemmy DB lag / transient 400
+                    if r.status_code == 400 and "couldnt_create_comment" in r.text:
+                        log(f"⚠️ Lemmy rejected comment — retrying once after 3s (r:{reddit_comment_id})…")
+                        time.sleep(3)
+                        jwt = get_valid_token(
+                            username=os.getenv("LEMMY_COMMENT_USER", os.getenv("LEMMY_USER")),
+                            password=os.getenv("LEMMY_COMMENT_PASS", os.getenv("LEMMY_PASS")),
+                        )
+                        headers = {"Authorization": f"Bearer {jwt}"}
+                        r = requests.post(
+                            f"{LEMMY_URL}/api/v3/comment",
+                            json=payload,
+                            headers=headers,
                             timeout=20,
                         )
 
@@ -154,7 +191,10 @@ def mirror_new_reddit_replies(force_backfill=False):
 
                     log(f"💬 Mirrored Reddit comment u/{getattr(rc.author, 'name', '[deleted]')} "
                         f"(r:{reddit_comment_id} → l:{lemmy_comment_id})")
-                    time.sleep(2.5)
+
+                    # 🕒 Gentle per-comment delay
+                    import random
+                    time.sleep(2.5 + random.uniform(0.5, 1.5))
 
                 except Exception as e:
                     log_error("reddit_comment_sync.mirror_comment", e)
