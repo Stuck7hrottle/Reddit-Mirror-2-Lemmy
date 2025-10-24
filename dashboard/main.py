@@ -13,7 +13,7 @@ from datetime import datetime
 # ─────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.getenv("DATA_DIR", "/opt/Reddit-Mirror-2-Lemmy/data"))
-LOG_FILE = DATA_DIR / "logs/bridge.log"
+LOG_FILE = Path(os.getenv("LOG_FILE", "/opt/Reddit-Mirror-2-Lemmy/logs/bridge.log"))
 STATUS_FILE = DATA_DIR / "state.json"
 
 # ─────────────────────────────────────────────
@@ -111,36 +111,48 @@ def metrics():
     """Optional JSON metrics for external monitoring"""
     return get_stats()
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 import asyncio
+import os
 
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
-    """Stream the tail of bridge.log live over a WebSocket connection."""
+    """Stream bridge.log lines live to the dashboard with graceful disconnects."""
     await websocket.accept()
     path = LOG_FILE
 
-    # Position the cursor at end of file
+    if not path.exists():
+        await websocket.send_text("No logs found.\n")
+        await websocket.close()
+        return
+
     try:
+        # Move to the end of the log file so we only stream new lines
         with open(path, "r", encoding="utf-8") as f:
             f.seek(0, os.SEEK_END)
-    except FileNotFoundError:
-        await websocket.send_text("No logs found.\n")
+            last_size = path.stat().st_size
 
-    last_size = path.stat().st_size if path.exists() else 0
-    try:
         while True:
-            await asyncio.sleep(1.0)  # check every second
+            await asyncio.sleep(1)
             if not path.exists():
                 continue
+
             current_size = path.stat().st_size
             if current_size > last_size:
                 with open(path, "r", encoding="utf-8") as f:
                     f.seek(last_size)
                     new_data = f.read()
-                await websocket.send_text(new_data)
+                try:
+                    await websocket.send_text(new_data)
+                except WebSocketDisconnect:
+                    print("🔌 Client disconnected from /ws/logs")
+                    break
                 last_size = current_size
-    except Exception:
-        # client disconnected or read error
-        await websocket.close()
 
+    except Exception as e:
+        print(f"⚠️ WebSocket error in /ws/logs: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except Exception:
+            pass

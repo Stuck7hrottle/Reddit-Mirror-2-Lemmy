@@ -22,21 +22,29 @@ let autoScroll = true;
 const logEl = document.getElementById("log-content");
 const pauseBtn = document.getElementById("pauseBtn");
 
-// Connect WebSocket (auto-adapts to HTTP/HTTPS)
-const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-const socket = new WebSocket(`${wsProtocol}://${location.host}/ws/logs`);
+function connectWebSocket() {
+  const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${wsProtocol}://${location.host}/ws/logs`);
 
-socket.addEventListener("message", (event) => {
-  logEl.textContent += event.data;
-  if (autoScroll) {
-    logEl.scrollTop = logEl.scrollHeight;
-  }
-});
+  socket.addEventListener("open", () => {
+    console.log("✅ Connected to /ws/logs");
+  });
 
-socket.addEventListener("close", () => {
-  const msg = "\n[connection closed]";
-  logEl.textContent += msg;
-});
+  socket.addEventListener("message", (event) => {
+    logEl.textContent += event.data;
+    if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
+  });
+
+  socket.addEventListener("close", () => {
+    console.warn("⚠️ WebSocket closed, retrying in 3s...");
+    setTimeout(connectWebSocket, 3000); // 🔁 Auto-reconnect
+  });
+
+  socket.addEventListener("error", (err) => {
+    console.error("WebSocket error:", err);
+    socket.close();
+  });
+}
 
 pauseBtn.addEventListener("click", () => {
   autoScroll = !autoScroll;
@@ -48,6 +56,8 @@ pauseBtn.addEventListener("click", () => {
     pauseBtn.classList.replace("bg-yellow-600", "bg-green-600");
   }
 });
+
+connectWebSocket();
 </script>
 
 {% endblock %}
