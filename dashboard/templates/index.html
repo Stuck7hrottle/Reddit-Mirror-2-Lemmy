@@ -1,56 +1,134 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="bg-gray-800 p-6 rounded-lg shadow text-gray-100">
+<div class="max-w-5xl mx-auto p-6 bg-gray-800 rounded-lg shadow text-gray-100">
   <h2 class="text-2xl font-semibold mb-4">📊 System Status</h2>
 
-<div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">Mirror Status</p>
-    <p class="text-lg font-semibold text-green-400">{{ stats.mirror_status }}</p>
+  <!-- Stats Grid -->
+  <div class="grid grid-cols-2 md:grid-cols-3 gap-4" id="statsGrid">
+    <div class="bg-gray-700 p-3 rounded">
+      <p class="text-sm text-gray-400">Mirror Status</p>
+      <p class="text-lg font-semibold text-green-400" data-key="mirror_status">{{ stats.mirror_status }}</p>
+    </div>
+
+    <div class="bg-gray-700 p-3 rounded">
+      <p class="text-sm text-gray-400">Posts Queued</p>
+      <p class="text-lg font-semibold" data-key="posts_queued">{{ stats.posts_queued }}</p>
+    </div>
+
+    <div class="bg-gray-700 p-3 rounded">
+      <p class="text-sm text-gray-400">Comments Queued</p>
+      <p class="text-lg font-semibold" data-key="comments_queued">{{ stats.comments_queued }}</p>
+    </div>
+
+    <div class="bg-gray-700 p-3 rounded">
+      <p class="text-sm text-gray-400">✅ Posts Done</p>
+      <p class="text-lg font-semibold text-green-300" data-key="posts_done">{{ stats.posts_done }}</p>
+    </div>
+
+    <div class="bg-gray-700 p-3 rounded">
+      <p class="text-sm text-gray-400">🎬 Videos Uploaded</p>
+      <p class="text-lg font-semibold text-purple-300" data-key="videos_uploaded">{{ stats.videos_uploaded }}</p>
+    </div>
+
+    <div class="bg-gray-700 p-3 rounded">
+      <p class="text-sm text-gray-400">⏭️ Duplicates Skipped</p>
+      <p class="text-lg font-semibold text-yellow-300" data-key="duplicates_skipped">{{ stats.duplicates_skipped }}</p>
+    </div>
+
+    <div class="bg-gray-700 p-3 rounded col-span-2 md:col-span-3">
+      <p class="text-sm text-gray-400">🕒 Uptime</p>
+      <p class="text-lg font-semibold" data-key="uptime">{{ stats.uptime }}</p>
+    </div>
   </div>
 
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">Posts Queued</p>
-    <p class="text-lg font-semibold">{{ stats.posts_queued }}</p>
+  <!-- Links -->
+  <div class="mt-6 flex justify-between items-center flex-wrap gap-3">
+    <a href="/logs" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded shadow">View Logs</a>
+    <a href="/metrics" class="bg-gray-600 hover:bg-gray-500 text-white py-2 px-4 rounded shadow">JSON Metrics</a>
   </div>
 
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">Comments Queued</p>
-    <p class="text-lg font-semibold">{{ stats.comments_queued }}</p>
-  </div>
-
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">✅ Posts Done</p>
-    <p class="text-lg font-semibold text-green-300">{{ stats.posts_done }}</p>
-  </div>
-
-  <!-- 🆕 New metric -->
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">🎬 Videos Uploaded</p>
-    <p class="text-lg font-semibold text-purple-300">{{ stats.videos_uploaded }}</p>
-  </div>
-
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">⏭️ Duplicates Skipped</p>
-    <p class="text-lg font-semibold text-yellow-300">{{ stats.duplicates_skipped }}</p>
-  </div>
-
-  <div class="bg-gray-700 p-3 rounded">
-    <p class="text-sm text-gray-400">🕒 Uptime</p>
-    <p class="text-lg font-semibold">{{ stats.uptime }}</p>
+  <!-- Chart Section -->
+  <div class="mt-10">
+    <h3 class="text-xl font-semibold mb-2">📈 Mirror Activity</h3>
+    <canvas id="jobsChart" class="bg-gray-700 rounded p-2"></canvas>
   </div>
 </div>
 
-  <div class="mt-6 flex justify-between items-center">
-    <a href="/logs" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded shadow">
-      View Logs
-    </a>
-    <a href="/metrics" class="bg-gray-600 hover:bg-gray-500 text-white py-2 px-4 rounded shadow">
-      JSON Metrics
-    </a>
-  </div>
-</div>
+<!-- Chart.js -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<script>
+let chart;
+
+// --- Auto-refresh metrics every 10s ---
+async function refreshStats() {
+  try {
+    const res = await fetch('/metrics');
+    const data = await res.json();
+
+    // Update number values
+    for (const [key, value] of Object.entries(data)) {
+      const el = document.querySelector(`[data-key="${key}"]`);
+      if (el) el.textContent = value;
+    }
+
+    // Update chart if present
+    if (chart) {
+      chart.data.datasets[0].data = [
+        data.posts_done,
+        data.posts_queued,
+        data.comments_queued,
+        data.videos_uploaded,
+        data.duplicates_skipped
+      ];
+      chart.update();
+    }
+  } catch (err) {
+    console.error('Error refreshing stats:', err);
+  }
+}
+
+// --- Initialize Chart.js ---
+function initChart(initialData) {
+  const ctx = document.getElementById('jobsChart');
+  chart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Posts Done', 'Queued', 'Comments', 'Videos', 'Duplicates'],
+      datasets: [{
+        label: 'Current Counts',
+        data: [
+          initialData.posts_done,
+          initialData.posts_queued,
+          initialData.comments_queued,
+          initialData.videos_uploaded,
+          initialData.duplicates_skipped
+        ],
+        backgroundColor: [
+          '#34d399', '#60a5fa', '#a78bfa', '#f472b6', '#facc15'
+        ]
+      }]
+    },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { color: '#d1d5db' } }, x: { ticks: { color: '#d1d5db' } } },
+    }
+  });
+}
+
+// Initialize when loaded
+document.addEventListener('DOMContentLoaded', () => {
+  const initialData = {
+    posts_done: parseInt(document.querySelector('[data-key="posts_done"]').textContent) || 0,
+    posts_queued: parseInt(document.querySelector('[data-key="posts_queued"]').textContent) || 0,
+    comments_queued: parseInt(document.querySelector('[data-key="comments_queued"]').textContent) || 0,
+    videos_uploaded: parseInt(document.querySelector('[data-key="videos_uploaded"]').textContent) || 0,
+    duplicates_skipped: parseInt(document.querySelector('[data-key="duplicates_skipped"]').textContent) || 0
+  };
+  initChart(initialData);
+  setInterval(refreshStats, 10000);
+});
+</script>
 
 {% endblock %}
-

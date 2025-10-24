@@ -110,3 +110,37 @@ def show_logs(request: Request):
 def metrics():
     """Optional JSON metrics for external monitoring"""
     return get_stats()
+
+from fastapi import WebSocket
+import asyncio
+
+@app.websocket("/ws/logs")
+async def websocket_logs(websocket: WebSocket):
+    """Stream the tail of bridge.log live over a WebSocket connection."""
+    await websocket.accept()
+    path = LOG_FILE
+
+    # Position the cursor at end of file
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            f.seek(0, os.SEEK_END)
+    except FileNotFoundError:
+        await websocket.send_text("No logs found.\n")
+
+    last_size = path.stat().st_size if path.exists() else 0
+    try:
+        while True:
+            await asyncio.sleep(1.0)  # check every second
+            if not path.exists():
+                continue
+            current_size = path.stat().st_size
+            if current_size > last_size:
+                with open(path, "r", encoding="utf-8") as f:
+                    f.seek(last_size)
+                    new_data = f.read()
+                await websocket.send_text(new_data)
+                last_size = current_size
+    except Exception:
+        # client disconnected or read error
+        await websocket.close()
+

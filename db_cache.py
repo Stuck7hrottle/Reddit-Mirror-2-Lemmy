@@ -78,6 +78,15 @@ class DB:
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
             """)
+            
+            # ignored_comments table (for permanently skipped Reddit comments)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS ignored_comments (
+                reddit_comment_id TEXT PRIMARY KEY,
+                reason TEXT DEFAULT 'couldnt_create_comment',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
 
     # ─────────────────────────────── Post Helpers ─────────────────────────────── #
     def save_post(self, reddit_id: str, lemmy_id: str, subreddit: str = "", source="reddit"):
@@ -144,13 +153,31 @@ class DB:
             row = conn.execute("SELECT reddit_id FROM comments WHERE lemmy_id = ?;", (lemmy_id,)).fetchone()
             return row["reddit_id"] if row else None
 
+    # ─────────────────────────────── Ignored Comment Helpers ─────────────────────────────── #
+    def mark_comment_ignored(self, reddit_comment_id: str, reason: str = "couldnt_create_comment"):
+        with self._lock, self._get_conn() as conn, conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO ignored_comments (reddit_comment_id, reason, created_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP);
+            """, (reddit_comment_id, reason))
+
+    def is_comment_ignored(self, reddit_comment_id: str) -> bool:
+        with self._lock, self._get_conn() as conn:
+            row = conn.execute("SELECT 1 FROM ignored_comments WHERE reddit_comment_id = ?;", (reddit_comment_id,)).fetchone()
+            return bool(row)
+
+    def get_ignored_comments(self) -> list[str]:
+        with self._lock, self._get_conn() as conn:
+            rows = conn.execute("SELECT reddit_comment_id FROM ignored_comments;").fetchall()
+            return [r["reddit_comment_id"] for r in rows]
+
     # ─────────────────────────────── Maintenance / Stats ─────────────────────────────── #
     def purge_old(self, days: int = 30) -> int:
         """Delete entries older than N days."""
-        cutoff = datetime.utcnow().timestamp() - (days * 86400)
+        cutoff = int(datetime.utcnow().timestamp()) - (days * 86400)
         with self._lock, self._get_conn() as conn, conn:
-            c1 = conn.execute("DELETE FROM posts WHERE strftime('%s', last_synced) < ?;", (cutoff,)).rowcount
-            c2 = conn.execute("DELETE FROM comments WHERE strftime('%s', last_synced) < ?;", (cutoff,)).rowcount
+            c1 = conn.execute("DELETE FROM posts WHERE CAST(strftime('%s', last_synced) AS INTEGER) < ?;", (cutoff,)).rowcount
+            c2 = conn.execute("DELETE FROM comments WHERE CAST(strftime('%s', last_synced) AS INTEGER) < ?;", (cutoff,)).rowcount
             return c1 + c2
 
     def get_stats(self) -> Dict[str, Any]:
@@ -158,8 +185,14 @@ class DB:
         with self._lock, self._get_conn() as conn:
             posts = conn.execute("SELECT COUNT(*) FROM posts;").fetchone()[0]
             comments = conn.execute("SELECT COUNT(*) FROM comments;").fetchone()[0]
-            return {"posts": posts, "comments": comments}
-
+            ignored_posts = conn.execute("SELECT COUNT(*) FROM ignored_posts;").fetchone()[0]
+            ignored_comments = conn.execute("SELECT COUNT(*) FROM ignored_comments;").fetchone()[0]
+            return {
+                "posts": posts,
+                "comments": comments,
+                "ignored_posts": ignored_posts,
+                "ignored_comments": ignored_comments,
+            }
 
 if __name__ == "__main__":
     db = DB()

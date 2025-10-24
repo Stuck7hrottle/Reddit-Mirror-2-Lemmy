@@ -78,6 +78,9 @@ def mirror_new_reddit_replies(force_backfill=False):
 
     # Use DB-based ignored posts tracking
     ignored_posts = set(db.get_ignored_posts())
+    
+    # Use DB-based ignore comments tracking
+    ignored_comments = set(db.get_ignored_comments())
 
     for reddit_post_id, lemmy_post_id in mirrored_posts:
         # 🔒 Skip permanently ignored posts
@@ -99,6 +102,10 @@ def mirror_new_reddit_replies(force_backfill=False):
                 comments = submission.comments.list()
             except Exception as e:
                 # Gracefully handle forbidden/deleted/private posts
+                if "429" in str(e):
+                    log("⚠️ Rate limited by Reddit (429) — sleeping 2 minutes before retrying.")
+                    time.sleep(120)
+                    continue
                 if "403" in str(e) or "forbidden" in str(e).lower():
                     log(f"⚠️ Skipping Reddit post {reddit_post_id} — access forbidden or removed.")
                     db.mark_post_ignored(reddit_post_id, reason="forbidden")
@@ -116,6 +123,11 @@ def mirror_new_reddit_replies(force_backfill=False):
 
                 # Skip duplicates unless forcing backfill
                 if not force_backfill and db.get_lemmy_comment_id(reddit_comment_id):
+                    continue
+                    
+                # Skip comments that previously failed to create on Lemmy
+                if reddit_comment_id in ignored_comments:
+                    log(f"🚫 Ignoring previously failed comment {reddit_comment_id}")
                     continue
 
                 formatted = format_reddit_comment_body(rc)
@@ -174,6 +186,12 @@ def mirror_new_reddit_replies(force_backfill=False):
                             headers=headers,
                             timeout=20,
                         )
+
+                    # If still failing after retry, permanently ignore this comment
+                    if not r.ok and r.status_code == 400 and "couldnt_create_comment" in r.text:
+                        db.mark_comment_ignored(reddit_comment_id, reason="couldnt_create_comment")
+                        log(f"🚫 Permanently ignoring comment {reddit_comment_id} (Lemmy rejected twice)")
+                        continue
 
                     if not r.ok:
                         log(f"⚠️ Failed Lemmy comment ({r.status_code}): {r.text[:150]}")

@@ -1,15 +1,53 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="bg-gray-800 p-4 rounded-lg shadow mb-4">
-  <h2 class="text-2xl font-semibold mb-3">Recent Logs</h2>
-  <div id="log-container" hx-get="/logs" hx-trigger="every 5s" hx-target="#log-container" hx-swap="outerHTML">
-    <pre class="bg-gray-900 p-3 rounded overflow-y-scroll h-[500px] text-sm">
-{% for line in lines %}
-{{ line.strip() }}
-{% endfor %}
-    </pre>
+
+<div class="max-w-5xl mx-auto bg-gray-800 p-6 rounded-lg shadow text-gray-100">
+  <div class="flex justify-between items-center mb-4">
+    <h2 class="text-2xl font-semibold">🪵 Live Log Stream</h2>
+    <div class="flex gap-2">
+      <button id="pauseBtn"
+              class="bg-yellow-600 hover:bg-yellow-500 text-white py-1 px-3 rounded text-sm">
+        ⏸️ Pause
+      </button>
+      <a href="/" class="bg-blue-600 hover:bg-blue-500 text-white py-1 px-3 rounded text-sm">← Back</a>
+    </div>
   </div>
+
+  <pre id="log-content"
+       class="bg-gray-900 p-3 rounded overflow-y-scroll h-[500px] text-sm leading-tight text-gray-300 font-mono"></pre>
 </div>
 
-<a href="/" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded">← Back</a>
+<script>
+let autoScroll = true;
+const logEl = document.getElementById("log-content");
+const pauseBtn = document.getElementById("pauseBtn");
+
+// Connect WebSocket (auto-adapts to HTTP/HTTPS)
+const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+const socket = new WebSocket(`${wsProtocol}://${location.host}/ws/logs`);
+
+socket.addEventListener("message", (event) => {
+  logEl.textContent += event.data;
+  if (autoScroll) {
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+});
+
+socket.addEventListener("close", () => {
+  const msg = "\n[connection closed]";
+  logEl.textContent += msg;
+});
+
+pauseBtn.addEventListener("click", () => {
+  autoScroll = !autoScroll;
+  if (autoScroll) {
+    pauseBtn.textContent = "⏸️ Pause";
+    pauseBtn.classList.replace("bg-green-600", "bg-yellow-600");
+  } else {
+    pauseBtn.textContent = "▶️ Resume";
+    pauseBtn.classList.replace("bg-yellow-600", "bg-green-600");
+  }
+});
+</script>
+
 {% endblock %}
