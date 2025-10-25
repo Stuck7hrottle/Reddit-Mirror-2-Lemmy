@@ -1,6 +1,15 @@
 <div id="worker-health" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
   {% for c in containers %}
-  <div class="bg-gray-700 p-4 rounded-lg shadow hover:bg-gray-600 transition">
+  <div class="
+    bg-gray-700 p-4 rounded-lg shadow hover:bg-gray-600 transition
+    {% if 'running' in c.status %}
+      pulse-green
+    {% elif 'restarting' in c.status %}
+      pulse-yellow
+    {% elif 'exited' in c.status %}
+      pulse-red
+    {% endif %}
+  ">
     <p class="text-lg font-semibold mb-2">{{ c.name }}</p>
 
     <div class="flex gap-2 mb-3">
@@ -33,13 +42,13 @@
     </div>
 
     {% if 'running' in c.status %}
-      <p class="text-green-400 font-semibold">🟢 {{ c.status }}</p>
+      <p class="status-text running font-semibold">🟢 {{ c.status }}</p>
     {% elif 'restarting' in c.status %}
-      <p class="text-yellow-400 font-semibold">🟡 {{ c.status }}</p>
+      <p class="status-text restarting font-semibold">🟡 {{ c.status }}</p>
     {% elif 'exited' in c.status %}
-      <p class="text-red-400 font-semibold">🔴 {{ c.status }}</p>
+      <p class="status-text exited font-semibold">🔴 {{ c.status }}</p>
     {% else %}
-      <p class="text-gray-400 font-semibold">⚪ {{ c.status }}</p>
+      <p class="status-text font-semibold text-gray-400">⚪ {{ c.status }}</p>
     {% endif %}
 
     <p class="text-sm text-gray-300 mt-2">
@@ -55,9 +64,11 @@ function confirmAction(name, action) {
   openConfirmModal(
     `Are you sure you want to ${action.toUpperCase()} “${name}”?`,
     () => {
+      showLoading(`${action.toUpperCase()} in progress…`, action);
       fetch(`/dashboard/container/${name}/${action}`, { method: 'POST' })
         .then(res => res.json())
         .then(data => {
+          hideLoading();
           if (data.success) {
             showToast(`✅ ${data.success}`);
           } else {
@@ -67,22 +78,24 @@ function confirmAction(name, action) {
           htmx.ajax('GET', '/dashboard/health', '#worker-health');
         })
         .catch(err => {
+          hideLoading();
           showToast(`❌ Network error: ${err}`, true);
         });
     }
   );
 }
-</script>
-<script>
+
 function confirmBuild(name, noCache) {
   const label = noCache ? 'BUILD (no cache)' : 'BUILD';
   openConfirmModal(
     `Are you sure you want to ${label} “${name}”? This may take a few minutes.`,
     () => {
+      showLoading(`${label} in progress…`, 'build');
       const url = `/dashboard/container/${name}/build${noCache ? '?no_cache=true' : ''}`;
       fetch(url, { method: 'POST' })
         .then(res => res.json())
         .then(data => {
+          hideLoading();
           if (data.success) {
             showToast(data.success);
           } else {
@@ -90,7 +103,10 @@ function confirmBuild(name, noCache) {
           }
           htmx.ajax('GET', '/dashboard/health', '#worker-health');
         })
-        .catch(err => showToast(`❌ Network error: ${err}`, true));
+        .catch(err => {
+          hideLoading();
+          showToast(`❌ Network error: ${err}`, true);
+        });
     }
   );
 }

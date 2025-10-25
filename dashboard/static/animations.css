@@ -1,0 +1,121 @@
+/* ─────────────────────────────────────────────
+   animations.css — shared dashboard animations
+   For Reddit → Lemmy Mirror Dashboard
+   ───────────────────────────────────────────── */
+
+/* 🔹 Smooth opacity transitions for overlays/modals */
+#loading-overlay,
+#confirm-modal,
+#toast {
+  transition: opacity 0.3s ease, visibility 0.3s ease;
+}
+
+/* 🔹 Hidden state fade-out */
+.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+/* 🔹 Visible state */
+#loading-overlay:not(.hidden),
+#confirm-modal:not(.hidden),
+#toast:not(.hidden) {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+/* ───────────────────────────────
+   Spinner Glow Animations (Dark Mode)
+   ─────────────────────────────── */
+
+/* Base spin (used by Tailwind’s animate-spin) */
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Add a soft neon glow depending on the spinner color */
+.spinner-glow-blue {
+  box-shadow: 0 0 15px 3px rgba(96, 165, 250, 0.5);
+}
+.spinner-glow-yellow {
+  box-shadow: 0 0 15px 3px rgba(250, 204, 21, 0.5);
+}
+.spinner-glow-red {
+  box-shadow: 0 0 15px 3px rgba(239, 68, 68, 0.5);
+}
+.spinner-glow-green {
+  box-shadow: 0 0 15px 3px rgba(34, 197, 94, 0.5);
+}
+
+/* Soft pulsing effect for the glow */
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.6; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.05); }
+}
+.spinner-glow-blue,
+.spinner-glow-yellow,
+.spinner-glow-red,
+.spinner-glow-green {
+  animation: pulse-glow 1.5s ease-in-out infinite;
+}
+
+/* ───────────────────────────────
+   Container pulse (for worker health)
+   ─────────────────────────────── */
+@keyframes pulse-green {
+  0%, 100% { background-color: #166534; }
+  50% { background-color: #22c55e; }
+}
+.pulse-green {
+  animation: pulse-green 2s infinite;
+}
+
+@keyframes pulse-yellow {
+  0%, 100% { background-color: #78350f; }
+  50% { background-color: #facc15; }
+}
+.pulse-yellow {
+  animation: pulse-yellow 2s infinite;
+}
+
+@keyframes pulse-red {
+  0%, 100% { background-color: #7f1d1d; }
+  50% { background-color: #ef4444; }
+}
+.pulse-red {
+  animation: pulse-red 2s infinite;
+}
+
+/* Smooth fade for the loading overlay */
+#loading-overlay {
+  transition: opacity 0.4s ease;
+}
+
+/* ─────────────────────────────── */
+/* Status Text Smooth Fade Effect  */
+/* ─────────────────────────────── */
+
+.status-text {
+  transition: color 0.6s ease, text-shadow 0.6s ease;
+}
+
+/* Optional gentle glow for running/restarting/exited */
+.status-text.running {
+  color: #6ee7b7; /* green-300 */
+  text-shadow: 0 0 6px rgba(110, 231, 183, 0.6);
+}
+
+.status-text.restarting {
+  color: #facc15; /* yellow-400 */
+  text-shadow: 0 0 6px rgba(250, 204, 21, 0.5);
+}
+
+.status-text.exited {
+  color: #f87171; /* red-400 */
+  text-shadow: 0 0 6px rgba(248, 113, 113, 0.5);
+}

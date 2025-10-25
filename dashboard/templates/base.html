@@ -4,10 +4,6 @@
   <meta charset="UTF-8">
   <title>Reddit → Lemmy Mirror Dashboard</title>
 
-  <style>
-    #confirm-modal { display: none !important; }
-  </style>
-
   <!-- Tailwind CSS -->
   <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
 
@@ -111,6 +107,50 @@
       const modal = document.getElementById('confirm-modal');
       if (modal) modal.classList.add('hidden');
     });
+  </script>
+  <!-- 🔹 Loading Overlay -->
+  <div id="loading-overlay"
+       class="hidden fixed inset-0 bg-black bg-opacity-60 flex flex-col items-center justify-center z-[9998]">
+    <div class="animate-spin rounded-full h-16 w-16 border-4 border-blue-400 border-t-transparent mb-4"></div>
+    <p id="loading-text" class="text-gray-100 text-lg font-medium">Processing...</p>
+  </div>
+
+  <script>
+    function showLoading(message = "Processing...", type = "info") {
+      const overlay = document.getElementById('loading-overlay');
+      const text = document.getElementById('loading-text');
+      const spinner = overlay.querySelector('div');
+
+      text.textContent = message;
+
+      // Reset colors + glow
+      spinner.classList.remove(
+        'border-blue-400', 'border-yellow-400', 'border-red-400', 'border-green-400',
+        'spinner-glow-blue', 'spinner-glow-yellow', 'spinner-glow-red', 'spinner-glow-green'
+      );
+      text.classList.remove('text-blue-100', 'text-yellow-100', 'text-red-100', 'text-green-100');
+
+      // ✅ Assign based on action type (final version)
+      if (type === "build") {
+        spinner.classList.add('border-blue-400', 'spinner-glow-blue');
+        text.classList.add('text-blue-100');
+      } else if (type === "restart") {
+        spinner.classList.add('border-yellow-400', 'spinner-glow-yellow');
+        text.classList.add('text-yellow-100');
+      } else if (type === "stop") {
+        spinner.classList.add('border-red-400', 'spinner-glow-red');
+        text.classList.add('text-red-100');
+      } else {
+        spinner.classList.add('border-green-400', 'spinner-glow-green');
+        text.classList.add('text-green-100');
+      }
+
+      overlay.classList.remove('hidden');
+    }
+
+    function hideLoading() {
+      document.getElementById('loading-overlay').classList.add('hidden');
+    }
   </script>
 </body>
 </html>
