@@ -1,12 +1,12 @@
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
-import json
-import os
-import sqlite3
+import json, os, sqlite3, asyncio
 from datetime import datetime
+import docker
+import subprocess
 
 # ─────────────────────────────────────────────
 # CONFIG PATHS
@@ -22,7 +22,8 @@ STATUS_FILE = DATA_DIR / "state.json"
 app = FastAPI(title="Reddit–Lemmy Mirror Dashboard")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
-app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+# ✅ Mount static assets at /dashboard/static
+app.mount("/dashboard/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -34,30 +35,9 @@ def tail_log(file_path, n=50):
     except FileNotFoundError:
         return ["No logs found.\n"]
 
-def load_status():
-    try:
-        if STATUS_FILE.exists():
-            return json.loads(STATUS_FILE.read_text())
-    except Exception:
-        pass
-    return {"mirror_status": "unknown", "posts_queued": 0, "comments_queued": 0, "uptime": "?"}
-
-# ─────────────────────────────────────────────
-# LIVE STATS
-# ─────────────────────────────────────────────
 def get_stats():
     db_path = DATA_DIR / "jobs.db"
-    stats = {
-        "mirror_status": "running",
-        "posts_queued": 0,
-        "comments_queued": 0,
-        "duplicates_skipped": 0,
-        "videos_uploaded": 0,   # 🆕 new metric
-        "posts_done": 0,
-        "uptime": "?",
-    }
-
-    # 🧱 Load counts from jobs.db
+    stats = {"mirror_status": "running", "posts_queued": 0, "comments_queued": 0, "duplicates_skipped": 0, "videos_uploaded": 0, "posts_done": 0, "uptime": "?"}
     if db_path.exists():
         conn = sqlite3.connect(db_path)
         cur = conn.cursor()
@@ -68,75 +48,166 @@ def get_stats():
             elif status == "queued":
                 stats["posts_queued"] += count
             elif status == "in_progress":
-                stats["posts_queued"] += count  # 👈 include active jobs too
+                stats["posts_queued"] += count
                 stats["mirror_status"] = "working"
         conn.close()
 
-    # 🪶 Parse duplicates skipped from logs (quick scan)
     if LOG_FILE.exists():
-        try:
-            lines = tail_log(LOG_FILE, 300)
-            stats["duplicates_skipped"] = sum("Skipping duplicate" in l for l in lines)
+        lines = tail_log(LOG_FILE, 300)
+        stats["duplicates_skipped"] = sum("Skipping duplicate" in l for l in lines)
+        stats["videos_uploaded"] = sum("METRIC_VIDEO_UPLOAD_SUCCESS" in l for l in lines)
 
-            # 🎬 Count successful video uploads
-            stats["videos_uploaded"] = sum("METRIC_VIDEO_UPLOAD_SUCCESS" in l for l in lines)
-        except Exception:
-            pass
-
-    # 🕒 Approximate uptime
     try:
         start_time = datetime.fromtimestamp(DATA_DIR.stat().st_ctime)
         delta = datetime.now() - start_time
         stats["uptime"] = f"{delta.days}d {delta.seconds // 3600}h"
     except Exception:
         pass
-
     return stats
 
 # ─────────────────────────────────────────────
 # ROUTES
 # ─────────────────────────────────────────────
-@app.get("/", response_class=HTMLResponse)
+@app.get("/dashboard/", response_class=HTMLResponse)
 def index(request: Request):
     stats = get_stats()
     return templates.TemplateResponse("index.html", {"request": request, "stats": stats})
 
-@app.get("/logs", response_class=HTMLResponse)
+@app.get("/dashboard/logs", response_class=HTMLResponse)
 def show_logs(request: Request):
     lines = tail_log(LOG_FILE, 50)
     return templates.TemplateResponse("logs.html", {"request": request, "lines": lines})
 
-@app.get("/metrics")
+@app.get("/dashboard/metrics")
 def metrics():
-    """Optional JSON metrics for external monitoring"""
     return get_stats()
 
-from fastapi import WebSocket, WebSocketDisconnect
-import asyncio
-import os
+@app.get("/dashboard/health", response_class=HTMLResponse)
+def get_worker_health_html(request: Request):
+    """Render Docker container stats as HTML for the dashboard (HTMX)."""
+    client = docker.DockerClient(base_url="unix://var/run/docker.sock")
+    container_names = [
+        "reddit_mirror_worker",
+        "reddit_mirror_refresh",
+        "lemmy_comment_sync",
+        "reddit_comment_sync"
+    ]
+    info = []
 
+    for name in container_names:
+        try:
+            c = client.containers.get(name)
+            stats = c.stats(stream=False)
+
+            cpu_total = stats["cpu_stats"]["cpu_usage"]["total_usage"]
+            sys_cpu = stats["cpu_stats"]["system_cpu_usage"]
+            prev_cpu_total = stats["precpu_stats"]["cpu_usage"]["total_usage"]
+            prev_sys_cpu = stats["precpu_stats"]["system_cpu_usage"]
+            cpu_delta = cpu_total - prev_cpu_total
+            sys_delta = sys_cpu - prev_sys_cpu
+            cpu_percent = round(
+                (cpu_delta / sys_delta)
+                * len(stats["cpu_stats"]["cpu_usage"].get("percpu_usage", []))
+                * 100,
+                2
+            ) if sys_delta > 0 else 0
+
+            mem_usage = stats["memory_stats"]["usage"] / (1024 * 1024)
+            mem_limit = stats["memory_stats"].get("limit", 1) / (1024 * 1024)
+            mem_percent = round((mem_usage / mem_limit) * 100, 1)
+
+            info.append({
+                "name": name,
+                "status": c.status,
+                "cpu_percent": cpu_percent,
+                "mem_mb": round(mem_usage, 1),
+                "mem_percent": mem_percent,
+                "uptime": c.attrs["State"]["StartedAt"],
+            })
+        except docker.errors.NotFound:
+            info.append({"name": name, "status": "not found"})
+        except Exception as e:
+            info.append({"name": name, "status": f"error: {e}"})
+
+    return templates.TemplateResponse("partials/worker_health.html", {
+        "request": request,
+        "containers": info
+    })
+
+@app.post("/dashboard/container/{name}/{action}")
+def control_container(name: str, action: str):
+    client = docker.DockerClient(base_url="unix://var/run/docker.sock")
+    try:
+        c = client.containers.get(name)
+        if action == "restart":
+            c.restart()
+        elif action == "stop":
+            c.stop()
+        elif action == "start":
+            c.start()
+        else:
+            return {"error": "Unsupported action"}
+        return {"success": f"{name} {action} executed"}
+    except docker.errors.NotFound:
+        return {"error": f"Container {name} not found"}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.post("/dashboard/container/{name}/build")
+def build_container(name: str, no_cache: bool = False):
+    """
+    Trigger a Docker build for a given container (same image used in docker-compose).
+    """
+    try:
+        # Map container names to their Docker Compose service names
+        service_map = {
+            "reddit_mirror_worker": "reddit-mirror",
+            "reddit_mirror_refresh": "reddit-refresh",
+            "lemmy_comment_sync": "lemmy_comment_sync",
+            "reddit_comment_sync": "reddit_comment_sync",
+            "mirror-dashboard": "mirror-dashboard",
+        }
+
+        service = service_map.get(name)
+        if not service:
+            return {"error": f"No docker-compose service mapped for {name}"}
+
+        build_cmd = ["docker", "compose", "build", service]
+        if no_cache:
+            build_cmd.append("--no-cache")
+
+        result = subprocess.run(build_cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            return {"success": f"✅ Build completed for {service}"}
+        else:
+            return {
+                "error": f"❌ Build failed for {service}",
+                "details": result.stderr or result.stdout,
+            }
+    except Exception as e:
+        return {"error": str(e)}
+
+# ─────────────────────────────────────────────
+# WEBSOCKET: Live Log Stream
+# ─────────────────────────────────────────────
 @app.websocket("/ws/logs")
 async def websocket_logs(websocket: WebSocket):
-    """Stream bridge.log lines live to the dashboard with graceful disconnects."""
     await websocket.accept()
     path = LOG_FILE
-
     if not path.exists():
         await websocket.send_text("No logs found.\n")
         await websocket.close()
         return
 
-    try:
-        # Move to the end of the log file so we only stream new lines
-        with open(path, "r", encoding="utf-8") as f:
-            f.seek(0, os.SEEK_END)
-            last_size = path.stat().st_size
+    with open(path, "r", encoding="utf-8") as f:
+        f.seek(0, os.SEEK_END)
+        last_size = path.stat().st_size
 
+    try:
         while True:
             await asyncio.sleep(1)
             if not path.exists():
                 continue
-
             current_size = path.stat().st_size
             if current_size > last_size:
                 with open(path, "r", encoding="utf-8") as f:
@@ -148,9 +219,8 @@ async def websocket_logs(websocket: WebSocket):
                     print("🔌 Client disconnected from /ws/logs")
                     break
                 last_size = current_size
-
     except Exception as e:
-        print(f"⚠️ WebSocket error in /ws/logs: {e}")
+        print(f"⚠️ WebSocket error: {e}")
     finally:
         try:
             await websocket.close()

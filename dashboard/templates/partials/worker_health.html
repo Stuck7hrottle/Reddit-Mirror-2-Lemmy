@@ -1,0 +1,97 @@
+<div id="worker-health" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+  {% for c in containers %}
+  <div class="bg-gray-700 p-4 rounded-lg shadow hover:bg-gray-600 transition">
+    <p class="text-lg font-semibold mb-2">{{ c.name }}</p>
+
+    <div class="flex gap-2 mb-3">
+      {% if 'running' in c.status %}
+        <!-- Running containers: restart / stop -->
+        <button onclick="confirmAction('{{ c.name }}', 'restart')"
+          class="text-xs bg-blue-600 hover:bg-blue-500 text-white px-3 py-1 rounded">
+          Restart
+        </button>
+        <button onclick="confirmAction('{{ c.name }}', 'stop')"
+          class="text-xs bg-red-600 hover:bg-red-500 text-white px-3 py-1 rounded">
+          Stop
+        </button>
+
+      {% elif 'exited' in c.status or 'not found' in c.status or 'error' in c.status %}
+        <!-- Stopped / missing: start / build / build no-cache -->
+        <button onclick="confirmAction('{{ c.name }}', 'start')"
+          class="text-xs bg-green-600 hover:bg-green-500 text-white px-3 py-1 rounded">
+          Start
+        </button>
+        <button onclick="confirmBuild('{{ c.name }}', false)"
+          class="text-xs bg-yellow-600 hover:bg-yellow-500 text-white px-3 py-1 rounded">
+          Build
+        </button>
+        <button onclick="confirmBuild('{{ c.name }}', true)"
+          class="text-xs bg-orange-600 hover:bg-orange-500 text-white px-3 py-1 rounded">
+          Build (no cache)
+        </button>
+      {% endif %}
+    </div>
+
+    {% if 'running' in c.status %}
+      <p class="text-green-400 font-semibold">🟢 {{ c.status }}</p>
+    {% elif 'restarting' in c.status %}
+      <p class="text-yellow-400 font-semibold">🟡 {{ c.status }}</p>
+    {% elif 'exited' in c.status %}
+      <p class="text-red-400 font-semibold">🔴 {{ c.status }}</p>
+    {% else %}
+      <p class="text-gray-400 font-semibold">⚪ {{ c.status }}</p>
+    {% endif %}
+
+    <p class="text-sm text-gray-300 mt-2">
+      CPU {{ c.cpu_percent }}% · MEM {{ c.mem_mb }} MB ({{ c.mem_percent }}%)
+    </p>
+    <p class="text-xs text-gray-400 truncate">⏱️ Started {{ c.uptime }}</p>
+  </div>
+  {% endfor %}
+</div>
+
+<script>
+function confirmAction(name, action) {
+  openConfirmModal(
+    `Are you sure you want to ${action.toUpperCase()} “${name}”?`,
+    () => {
+      fetch(`/dashboard/container/${name}/${action}`, { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) {
+            showToast(`✅ ${data.success}`);
+          } else {
+            showToast(`⚠️ ${data.error || 'Unexpected error'}`, true);
+          }
+          // Refresh the worker grid
+          htmx.ajax('GET', '/dashboard/health', '#worker-health');
+        })
+        .catch(err => {
+          showToast(`❌ Network error: ${err}`, true);
+        });
+    }
+  );
+}
+</script>
+<script>
+function confirmBuild(name, noCache) {
+  const label = noCache ? 'BUILD (no cache)' : 'BUILD';
+  openConfirmModal(
+    `Are you sure you want to ${label} “${name}”? This may take a few minutes.`,
+    () => {
+      const url = `/dashboard/container/${name}/build${noCache ? '?no_cache=true' : ''}`;
+      fetch(url, { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success) {
+            showToast(data.success);
+          } else {
+            showToast(data.error || 'Build failed', true);
+          }
+          htmx.ajax('GET', '/dashboard/health', '#worker-health');
+        })
+        .catch(err => showToast(`❌ Network error: ${err}`, true));
+    }
+  );
+}
+</script>

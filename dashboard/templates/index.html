@@ -53,10 +53,24 @@
     <h3 class="text-xl font-semibold mb-2">📈 Mirror Activity</h3>
     <canvas id="jobsChart" class="bg-gray-700 rounded p-2"></canvas>
   </div>
+
+  <!-- 🩺 Worker Health Grid -->
+  <div class="bg-gray-800 p-6 rounded-lg shadow text-gray-100 mt-10">
+    <h2 class="text-2xl font-semibold mb-4">🩺 Worker Health</h2>
+    <div id="worker-health"
+         hx-get="/dashboard/health"
+         hx-trigger="load, every 10s"
+         hx-target="#worker-health"
+         hx-swap="outerHTML">
+      <p class="text-gray-400 italic">Loading worker stats…</p>
+    </div>
+  </div>
 </div>
 
 <!-- Chart.js -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+<!-- HTMX -->
+<script src="https://unpkg.com/htmx.org@1.9.10"></script>
 
 <script>
 let chart;
@@ -112,7 +126,10 @@ function initChart(initialData) {
     },
     options: {
       plugins: { legend: { display: false } },
-      scales: { y: { beginAtZero: true, ticks: { color: '#d1d5db' } }, x: { ticks: { color: '#d1d5db' } } },
+      scales: { 
+        y: { beginAtZero: true, ticks: { color: '#d1d5db' } },
+        x: { ticks: { color: '#d1d5db' } }
+      }
     }
   });
 }
