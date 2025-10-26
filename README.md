@@ -17,14 +17,14 @@ Built for self-hosted instances and community moderation, the mirror runs entire
 
 ### 🧱 Architecture
 
-| Component | Purpose |
-|------------|----------|
-| `reddit-mirror` | Mirrors Reddit → Lemmy posts |
-| `reddit-refresh` | Periodically re-runs mirror cycles |
-| `reddit_comment_sync` | Mirrors Reddit comments → Lemmy |
-| `lemmy_comment_sync` | Mirrors Lemmy comments → Reddit |
-| `mirror-dashboard` | FastAPI + HTMX dashboard for monitoring |
-| `data/` | Persistent storage for SQLite and caches |
+| Component | Purpose | Default |
+|------------|----------|----------|
+| `reddit-mirror` | Mirrors Reddit → Lemmy posts | Enabled |
+| `reddit-refresh` | Periodically re-runs mirror cycles | Enabled |
+| `reddit_comment_sync` | Mirrors Reddit comments → Lemmy | Enabled |
+| `lemmy_comment_sync` | Mirrors Lemmy comments → Reddit | DISABLED by Default |
+| `mirror-dashboard` | FastAPI + HTMX dashboard for monitoring | Enabled |
+| `data/` | Persistent storage for SQLite and caches | Enabled |
 
 Each container communicates through shared SQLite databases (`jobs.db`, `bridge_cache.db`) located under `/opt/Reddit-Mirror-2-Lemmy/data`.
 
@@ -41,6 +41,18 @@ Each container communicates through shared SQLite databases (`jobs.db`, `bridge_
 - ✅ Configurable sync intervals and comment filters  
 - ✅ Support for `.env` hot reloads (e.g., SUB_MAP updates)
 
+---
+
+## 📦 Requirements
+
+- Docker and Docker Compose
+- A Lemmy instance (self-hosted or federated)
+- Two Lemmy bot accounts (recommended):
+  - One for posts (e.g. `mirrorbot`)
+  - One for comments (e.g. `mirrorcomments`)
+- 2 Reddit accounts with Reddit API credentials (from [Reddit App Console](https://www.reddit.com/prefs/apps))
+  - One for Reddit to Lemmy - Choose script not web app when creating
+  - One for Lemmy to Reddit - Choose script not web app when creating
 ---
 
 ### 📦 Installation
@@ -64,7 +76,7 @@ REDDIT_CLIENT_SECRET=xxxx
 REDDIT_USERNAME=redditbot
 REDDIT_PASSWORD=secret
 SUB_MAP=fosscad:fosscad,gundeals:gundeals
-ENABLE_LEMMY_COMMENT_SYNC=true
+ENABLE_LEMMY_COMMENT_SYNC=true - THIS IS FALSE BY DEFAULT
 ```
 
 #### 3️⃣ Start the stack
