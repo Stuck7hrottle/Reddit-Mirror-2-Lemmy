@@ -10,9 +10,25 @@
       pulse-red
     {% endif %}
   ">
-    <p class="text-lg font-semibold mb-2">{{ c.name }}</p>
+    <p class="text-lg font-semibold mb-2 flex items-center justify-between">
+      <span>
+        {{ c.name }}
+        {% if c.name == 'lemmy_comment_sync' and c.sync_state %}
+          <span class="ml-1 text-sm {% if c.sync_state == 'active' %}text-green-400{% else %}text-gray-400{% endif %}">
+            ({{ c.sync_state }})
+          </span>
+        {% endif %}
+      </span>
 
-    <div class="flex gap-2 mb-3">
+      {% if c.name == 'lemmy_comment_sync' %}
+        <button onclick="toggleCommentSync()" 
+          class="text-xs bg-purple-600 hover:bg-purple-500 text-white px-2 py-1 rounded ml-2">
+          Toggle Sync
+        </button>
+      {% endif %}
+    </p>
+
+    <div class="flex flex-wrap gap-2 mb-3">
       {% if 'running' in c.status %}
         <!-- Running containers: restart / stop -->
         <button onclick="confirmAction('{{ c.name }}', 'restart')"
@@ -42,11 +58,11 @@
     </div>
 
     {% if 'running' in c.status %}
-      <p class="status-text running font-semibold">🟢 {{ c.status }}</p>
+      <p class="status-text running font-semibold text-green-400">🟢 {{ c.status }}</p>
     {% elif 'restarting' in c.status %}
-      <p class="status-text restarting font-semibold">🟡 {{ c.status }}</p>
+      <p class="status-text restarting font-semibold text-yellow-400">🟡 {{ c.status }}</p>
     {% elif 'exited' in c.status %}
-      <p class="status-text exited font-semibold">🔴 {{ c.status }}</p>
+      <p class="status-text exited font-semibold text-red-400">🔴 {{ c.status }}</p>
     {% else %}
       <p class="status-text font-semibold text-gray-400">⚪ {{ c.status }}</p>
     {% endif %}
@@ -102,6 +118,30 @@ function confirmBuild(name, noCache) {
             showToast(data.error || 'Build failed', true);
           }
           htmx.ajax('GET', '/dashboard/health', '#worker-health');
+        })
+        .catch(err => {
+          hideLoading();
+          showToast(`❌ Network error: ${err}`, true);
+        });
+    }
+  );
+}
+
+function toggleCommentSync() {
+  openConfirmModal(
+    `Toggle Lemmy→Reddit comment sync?`,
+    () => {
+      showLoading("Toggling comment sync...", "build");
+      fetch(`/dashboard/container/toggle-comment-sync`, { method: 'POST' })
+        .then(res => res.json())
+        .then(data => {
+          hideLoading();
+          if (data.success) {
+            showToast(`✅ ${data.success}`);
+            htmx.ajax('GET', '/dashboard/health', '#worker-health');
+          } else {
+            showToast(`⚠️ ${data.error || 'Unexpected error'}`, true);
+          }
         })
         .catch(err => {
           hideLoading();

@@ -1,140 +1,143 @@
-> **Note:** The legacy JSON-based bridge has been archived under the branch [`legacy-json`](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-json).
-> The current `master` branch uses the new SQLite background worker system.
+# Reddit ↔ Lemmy Mirror
 
-# Reddit → Lemmy Bridge
-
-A self-hosted Python system that mirrors Reddit communities, posts, and comments into matching Lemmy communities.
+A self-hosted bridge that **syncs posts and comments** between Reddit and Lemmy communities — automatically, bi-directionally, and with media mirroring.
 
 ---
 
-## 🚀 Features
+### 🌍 Overview
 
-- Mirrors Reddit → Lemmy posts, titles, selftext, images, galleries, and videos  
-- Mirrors Reddit comments in chronological order  
-- Supports periodic refresh cycles (via a separate container)  
-- Fetches up to 100 posts per batch and supports full-history pagination (`POST_FETCH_LIMIT=all`)  
-- Automatically skips duplicates using local SQLite caches  
-- Preserves Reddit post permalinks and embeds galleries cleanly in Lemmy  
-- Optional refresh/update mode to rebuild posts with new formatting or embeds  
+This system mirrors:
+- **Reddit → Lemmy:** posts, comments, images, galleries, and videos  
+- **Lemmy → Reddit:** comments (humanized phrasing + media rehosting)  
+- **Dashboard control:** live stats, logs, and Docker container management  
 
----
-
-## 🧩 Architecture
-
-| Component | Description |
-|------------|-------------|
-| **reddit-mirror** | Worker service that mirrors posts and comments from Reddit to Lemmy |
-| **reddit-refresh** | Scheduler container that periodically re-triggers mirroring cycles |
-| **data/** | Local persistent directory containing SQLite databases (`jobs.db`, `bridge_cache.db`) and caches |
-
-Each subreddit listed in the bridge’s configuration will map to a Lemmy community of the same name (e.g., `r/example` → `c/example`).
+Built for self-hosted instances and community moderation, the mirror runs entirely via Docker containers and SQLite databases.
 
 ---
 
-## ⚙️ Setup
+### 🧱 Architecture
 
-### 1️⃣ Clone the Repository
+| Component | Purpose |
+|------------|----------|
+| `reddit-mirror` | Mirrors Reddit → Lemmy posts |
+| `reddit-refresh` | Periodically re-runs mirror cycles |
+| `reddit_comment_sync` | Mirrors Reddit comments → Lemmy |
+| `lemmy_comment_sync` | Mirrors Lemmy comments → Reddit |
+| `mirror-dashboard` | FastAPI + HTMX dashboard for monitoring |
+| `data/` | Persistent storage for SQLite and caches |
+
+Each container communicates through shared SQLite databases (`jobs.db`, `bridge_cache.db`) located under `/opt/Reddit-Mirror-2-Lemmy/data`.
+
+---
+
+### ✨ Features
+
+- ✅ Full **two-way** post & comment mirroring  
+- ✅ **Media rehosting** (images → `/pictrs`, video labeling)  
+- ✅ **Dashboard** with live metrics, charts, and Docker controls  
+- ✅ **Job queue persistence** (via SQLite)  
+- ✅ Automatic **token renewal** for Lemmy & Reddit  
+- ✅ Built-in **rate limiting and backoff** handling  
+- ✅ Configurable sync intervals and comment filters  
+- ✅ Support for `.env` hot reloads (e.g., SUB_MAP updates)
+
+---
+
+### 📦 Installation
+
+#### 1️⃣ Clone and prepare
 ```bash
-git clone https://github.com/yourname/reddit-to-lemmy.git
-cd reddit-to-lemmy
+git clone https://github.com/yourname/reddit-lemmy-mirror.git
+cd reddit-lemmy-mirror
+cp .env.example .env
 ```
 
-### 2️⃣ Copy Example Configuration
-```bash
-cp examples/.env.example .env
-cp examples/docker-compose.example.yml docker-compose.yml
+#### 2️⃣ Edit `.env`
+Set up credentials and mappings:
+```
+LEMMY_URL=https://your.lemmy.instance
+LEMMY_USER=botuser
+LEMMY_PASS=botpass
+REDDIT_CLIENT_ID=xxxx
+REDDIT_CLIENT_SECRET=xxxx
+REDDIT_USERNAME=redditbot
+REDDIT_PASSWORD=secret
+SUB_MAP=fosscad:fosscad,gundeals:gundeals
+ENABLE_LEMMY_COMMENT_SYNC=true
 ```
 
-### 3️⃣ Edit `.env`
-Set:
-- `LEMMY_URL` → your Lemmy instance  
-- `LEMMY_USER` / `LEMMY_PASS` → your bot credentials  
-- `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` → your Reddit app credentials  
-- `POST_FETCH_LIMIT` → number of posts per subreddit (`50`, `100`, or `all`)  
-
-### 4️⃣ Run the Bridge
+#### 3️⃣ Start the stack
 ```bash
 docker compose up -d
 ```
 
-Monitor logs:
+#### 4️⃣ Visit the Dashboard
+```
+http://localhost:8000/dashboard/
+```
+
+You’ll see:
+- Live post/comment stats
+- Container health (CPU/RAM)
+- Start/stop/build controls
+- Real-time logs
+
+---
+
+### 🧠 Usage Notes
+
+#### Mirror Cycles
+- Default interval: **10 minutes**
+- Controlled by `reddit-refresh` container
+- Backfill and edit syncs enabled via `.env`
+
+#### Dashboard API Endpoints
+| Path | Description |
+|------|--------------|
+| `/dashboard/` | Main overview |
+| `/dashboard/logs` | WebSocket log stream |
+| `/dashboard/health` | Docker container stats |
+| `/dashboard/metrics` | JSON metrics API |
+| `/dashboard/container/{name}/{action}` | Start/stop/restart a worker |
+
+---
+
+### ⚙️ Configuration Reference
+
+| Variable | Description | Default |
+|-----------|--------------|----------|
+| `LEMMY_URL` | Base Lemmy instance URL | required |
+| `SUB_MAP` | `reddit_sub:lemmy_comm` mappings | example values |
+| `ENABLE_LEMMY_COMMENT_SYNC` | Mirror Lemmy → Reddit comments | false |
+| `REDDIT_COMMENT_SYNC_INTERVAL` | Reddit → Lemmy interval (sec) | 600 |
+| `LEMMY_COMMENT_SYNC_INTERVAL` | Lemmy → Reddit interval (sec) | 600 |
+| `DATA_DIR` | Data directory | `/opt/Reddit-Mirror-2-Lemmy/data` |
+| `MIRROR_COMMENTS` | Enable comment mirroring | true |
+| `MAX_POSTS_PER_RUN` | Limit per cycle | 5 |
+| `POST_FETCH_LIMIT` | Post fetch limit | `all` |
+| `REDDIT_BOT_USERNAME` | Prevents self-loop comments | optional |
+
+---
+
+### 🧩 Development
+
+To run components manually:
 ```bash
-docker compose logs -f reddit-refresh
+python3 mirror_worker.py
+python3 lemmy_comment_sync.py
+python3 reddit_comment_sync.py
+python3 main.py  # dashboard
 ```
 
 ---
 
-## 🔁 Refresh Cycles & Pagination
+### 🪄 Legacy Version
 
-- The **refresh container** runs every 15 minutes by default (`REFRESH_INTERVAL=900`).  
-- Each cycle checks all configured subreddits and mirrors new or edited content.  
-- `POST_FETCH_LIMIT=all` enables full backfill with pagination — fetching thousands of posts safely.  
-- The bridge pauses between batches to avoid Reddit API rate limits.
-
-Example log:
-```
-🔁 Fetching subreddit: r/fosscad2
-🪶 Found Reddit post abc123: New Frame Release
-✨ Done — processed 145 posts from r/fosscad2.
-```
+The legacy JSON bridge (pre–SQLite) is archived here:  
+🔗 **[`legacy-json` branch](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-json)**
 
 ---
 
-## 🧠 Advanced Usage
+### 🧾 License
 
-### Updating Existing Lemmy Posts
-If you improve post embedding logic (e.g., gallery or video support), reprocess all mirrored posts:
-
-```bash
-docker compose run --rm reddit-mirror python3 auto_mirror.py --update-existing
-```
-
-### Manual Trigger
-You can also force an immediate refresh cycle:
-```bash
-docker compose run --rm reddit-refresh python3 auto_mirror.py --refresh
-```
-
----
-
-## 🛠️ Maintenance
-
-See [`docs/maintenance.md`](docs/maintenance.md) for:
-- Cache resets  
-- Database inspection (`sqlite3 data/jobs.db`)  
-- Rebuilding containers  
-- Troubleshooting comment syncs  
-
----
-
-## 🧩 Example Folder
-
-| File | Purpose |
-|------|----------|
-| `examples/.env.example` | Minimal environment file for setup |
-| `examples/docker-compose.example.yml` | Example Docker Compose stack |
-| `docs/maintenance.md` | Common admin operations and recovery steps |
-
----
-
-## 🗺️ Roadmap
-
-Planned enhancements:
-- Direct video upload to Lemmy (instead of Reddit-hosted links)
-- Edit tracking for mirrored posts/comments
-- Multi-instance federation sync
-- Web UI for queue and job status
-- Optional moderation tools for mirrored content
-
----
-
-## ⚖️ License
-
-MIT License © 2025 — Open source and community maintained.
-
----
-
-## 💬 Credits
-
-Developed by the FOSSCAD team and contributors.  
-Built for resilient, federated content archiving between Reddit and Lemmy.
+MIT © 2025 — Developed by FOSSCAD contributors and the open-source community.

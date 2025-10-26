@@ -99,6 +99,7 @@ def get_worker_health_html(request: Request):
             c = client.containers.get(name)
             stats = c.stats(stream=False)
 
+            # ─── CPU USAGE ────────────────────────────────────────────────
             cpu_total = stats["cpu_stats"]["cpu_usage"]["total_usage"]
             sys_cpu = stats["cpu_stats"]["system_cpu_usage"]
             prev_cpu_total = stats["precpu_stats"]["cpu_usage"]["total_usage"]
@@ -112,10 +113,22 @@ def get_worker_health_html(request: Request):
                 2
             ) if sys_delta > 0 else 0
 
+            # ─── MEMORY USAGE ─────────────────────────────────────────────
             mem_usage = stats["memory_stats"]["usage"] / (1024 * 1024)
             mem_limit = stats["memory_stats"].get("limit", 1) / (1024 * 1024)
             mem_percent = round((mem_usage / mem_limit) * 100, 1)
 
+            # ─── Check ENABLE_LEMMY_COMMENT_SYNC flag ─────────────────────
+            sync_state = None
+            if name == "lemmy_comment_sync":
+                env_path = Path("/opt/Reddit-Mirror-2-Lemmy/.env")
+                if env_path.exists():
+                    for line in env_path.read_text().splitlines():
+                        if line.startswith("ENABLE_LEMMY_COMMENT_SYNC="):
+                            sync_state = "active" if "true" in line.lower() else "disabled"
+                            break
+
+            # ─── Append container info ───────────────────────────────────
             info.append({
                 "name": name,
                 "status": c.status,
@@ -123,6 +136,7 @@ def get_worker_health_html(request: Request):
                 "mem_mb": round(mem_usage, 1),
                 "mem_percent": mem_percent,
                 "uptime": c.attrs["State"]["StartedAt"],
+                "sync_state": sync_state
             })
         except docker.errors.NotFound:
             info.append({"name": name, "status": "not found"})
@@ -136,9 +150,17 @@ def get_worker_health_html(request: Request):
 
 @app.post("/dashboard/container/{name}/{action}")
 def control_container(name: str, action: str):
+    """
+    Control containers (start/stop/restart).
+    If the container is lemmy_comment_sync, also persist its state to .env.
+    """
     client = docker.DockerClient(base_url="unix://var/run/docker.sock")
+    env_path = Path(os.getenv("ENV_PATH", "/opt/Reddit-Mirror-2-Lemmy/.env"))
+
     try:
         c = client.containers.get(name)
+
+        # Perform the requested action
         if action == "restart":
             c.restart()
         elif action == "stop":
@@ -147,7 +169,34 @@ def control_container(name: str, action: str):
             c.start()
         else:
             return {"error": "Unsupported action"}
+
+        # 🧠 Persist state for lemmy_comment_sync
+        if name == "lemmy_comment_sync":
+            if not env_path.exists():
+                raise FileNotFoundError(f".env file not found at {env_path}")
+
+            lines = env_path.read_text().splitlines()
+            updated_lines = []
+            found = False
+
+            for line in lines:
+                if line.startswith("ENABLE_LEMMY_COMMENT_SYNC="):
+                    found = True
+                    new_value = "true" if action == "start" else "false"
+                    updated_lines.append(f"ENABLE_LEMMY_COMMENT_SYNC={new_value}")
+                else:
+                    updated_lines.append(line)
+
+            if not found:
+                # Add it if not already in file
+                updated_lines.append(
+                    f"ENABLE_LEMMY_COMMENT_SYNC={'true' if action == 'start' else 'false'}"
+                )
+
+            env_path.write_text("\n".join(updated_lines))
+
         return {"success": f"{name} {action} executed"}
+
     except docker.errors.NotFound:
         return {"error": f"Container {name} not found"}
     except Exception as e:
@@ -186,6 +235,48 @@ def build_container(name: str, no_cache: bool = False):
             }
     except Exception as e:
         return {"error": str(e)}
+
+# ─────────────────────────────────────────────
+# TOGGLE COMMENT SYNC (Enable/Disable)
+# ─────────────────────────────────────────────
+@app.post("/dashboard/container/toggle-comment-sync")
+def toggle_comment_sync():
+    """
+    Toggle ENABLE_LEMMY_COMMENT_SYNC in .env, rebuild container, and restart it.
+    """
+    env_path = Path("/opt/Reddit-Mirror-2-Lemmy/.env")
+    if not env_path.exists():
+        return {"error": ".env not found"}
+
+    # 🔄 Read and flip the state
+    lines = env_path.read_text().splitlines()
+    new_lines = []
+    current = "false"
+    for line in lines:
+        if line.startswith("ENABLE_LEMMY_COMMENT_SYNC="):
+            current = line.split("=")[1].strip().lower()
+        else:
+            new_lines.append(line)
+
+    new_value = "false" if current == "true" else "true"
+    new_lines.append(f"ENABLE_LEMMY_COMMENT_SYNC={new_value}")
+    env_path.write_text("\n".join(new_lines))
+
+    # 🧱 Rebuild and recreate the container to apply env change
+    try:
+        rebuild_cmd = [
+            "docker", "compose",
+            "-f", "/opt/Reddit-Mirror-2-Lemmy/docker-compose.yml",
+            "up", "-d", "--build", "--force-recreate", "lemmy_comment_sync"
+        ]
+        result = subprocess.run(rebuild_cmd, capture_output=True, text=True)
+        if result.returncode != 0:
+            return {"error": result.stderr or result.stdout}
+
+    except Exception as e:
+        return {"error": str(e)}
+
+    return {"success": f"Comment sync {'ENABLED' if new_value == 'true' else 'DISABLED'}", "state": new_value}
 
 # ─────────────────────────────────────────────
 # WEBSOCKET: Live Log Stream
