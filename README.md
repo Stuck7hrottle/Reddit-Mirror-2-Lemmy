@@ -49,7 +49,8 @@ Each container communicates through shared SQLite databases (`jobs.db`, `bridge_
 ```bash
 git clone https://github.com/yourname/reddit-lemmy-mirror.git
 cd reddit-lemmy-mirror
-cp .env.example .env
+cp examples/.env .env
+cp examples/docker-compose.yml docker-compose.yml
 ```
 
 #### 2️⃣ Edit `.env`
@@ -82,6 +83,21 @@ You’ll see:
 - Start/stop/build controls
 - Real-time logs
 
+---
+
+## 🔁 Refresh Cycles & Pagination
+
+- The **refresh container** runs every 15 minutes by default (`REFRESH_INTERVAL=900`).  
+- Each cycle checks all configured subreddits and mirrors new or edited content.  
+- `POST_FETCH_LIMIT=all` enables full backfill with pagination — fetching thousands of posts safely.  
+- The bridge pauses between batches to avoid Reddit API rate limits.
+
+Example log:
+```
+🔁 Fetching subreddit: r/fosscad2
+🪶 Found Reddit post abc123: New Frame Release
+✨ Done — processed 145 posts from r/fosscad2.
+```
 ---
 
 ### 🧠 Usage Notes
@@ -123,18 +139,22 @@ You’ll see:
 
 To run components manually:
 ```bash
+python3 background_worker.py
 python3 mirror_worker.py
 python3 lemmy_comment_sync.py
 python3 reddit_comment_sync.py
-python3 main.py  # dashboard
+python3 dashboard/main.py  # dashboard
 ```
 
 ---
 
 ### 🪄 Legacy Version
 
-The legacy JSON bridge (pre–SQLite) is archived here:  
+The legacy JSON On-Way bridge (pre–SQLite) is archived here:
 🔗 **[`legacy-json` branch](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-json)**
+
+The legacy SQLite One-Way bridge is archived here:
+🔗 **[`legacy-sqlite` branch](https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy/tree/legacy-sqlite)**
 
 ---
 
