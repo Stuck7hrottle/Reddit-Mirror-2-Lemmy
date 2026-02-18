@@ -32,7 +32,10 @@ def create_reddit_client():
     )
 
 def format_reddit_comment_body(comment):
-    """Generate Markdown for Lemmy with mirrored media list."""
+    """
+    Generate Markdown for Lemmy with locally mirrored media.
+    Ensures no outbound links to Reddit remain in the comment body.
+    """
     author = getattr(comment, "author", None)
     name = getattr(author, "name", None)
     author_line = f"**u/{name}:**" if name else "**u/[deleted]:**"
@@ -41,26 +44,33 @@ def format_reddit_comment_body(comment):
     if not body or body in ("[deleted]", "[removed]"):
         return None
 
-    # Extract & mirror media; remove raw URLs from visible text
+    # Extract & mirror media using your updated mirror_media engine
+    # This now handles both images and videos locally
     urls = find_urls(body)
     mirrored_links: list[str] = []
+
     for u in urls:
         try:
+            # mirror_url now downloads and rehosts videos and images locally
             m = mirror_url(u)
             if m:
                 mirrored_links.append(m)
+                # Remove the original outbound URL from the comment text
                 body = body.replace(u, "")
         except Exception as e:
             log_error("reddit_comment_sync.mirror_media", e)
 
     parts = [author_line, "", body.strip()]
+
     if mirrored_links:
         parts += ["", "📸 **Mirrored media:**"]
         for m in mirrored_links:
-            parts.append(f"- {m}")
+            # Check for video extensions to provide appropriate labeling
+            if any(ext in m.lower() for ext in (".mp4", ".webm", ".mov")):
+                parts.append(f"- [Video]({m})")
+            else:
+                parts.append(f"- ![Image]({m})")
 
-    # Foodnote keeps it tidy without outbound Reddit permalinks (optional)
-    parts += ["", "— _Mirrored from Reddit_"]
     return "\n".join([p for p in parts if p]).strip()
 
 def mirror_new_reddit_replies(force_backfill=False):
@@ -78,7 +88,7 @@ def mirror_new_reddit_replies(force_backfill=False):
 
     # Use DB-based ignored posts tracking
     ignored_posts = set(db.get_ignored_posts())
-    
+
     # Use DB-based ignore comments tracking
     ignored_comments = set(db.get_ignored_comments())
 
@@ -124,7 +134,7 @@ def mirror_new_reddit_replies(force_backfill=False):
                 # Skip duplicates unless forcing backfill
                 if not force_backfill and db.get_lemmy_comment_id(reddit_comment_id):
                     continue
-                    
+
                 # Skip comments that previously failed to create on Lemmy
                 if reddit_comment_id in ignored_comments:
                     log(f"🚫 Ignoring previously failed comment {reddit_comment_id}")

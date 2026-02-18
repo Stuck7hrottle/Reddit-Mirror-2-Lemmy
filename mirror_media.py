@@ -13,6 +13,7 @@ import json
 import time
 from pathlib import Path
 import requests
+import subprocess
 
 # Pull shared helpers if available; fall back gracefully if not.
 try:
@@ -37,8 +38,8 @@ DATA_DIR = Path(os.getenv("DATA_DIR", "/opt/Reddit-Mirror-2-Lemmy/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 CACHE_PATH = DATA_DIR / "media_cache.json"
-CACHE_TTL_SECS = int(os.getenv("MEDIA_CACHE_TTL_SECS", str(14 * 24 * 3600)))  # 14 days
-MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(10 * 1024 * 1024)))    # 10 MB limit
+CACHE_TTL_SECS = int(os.getenv("MEDIA_CACHE_TTL_SECS", str(99 * 365 * 3600)))  # 14 days
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(500 * 1024 * 1024)))    # 10 MB limit
 
 VIDEO_DOMAINS = (
     "youtube.com", "youtu.be", "rumble.com", "odysee.com",
@@ -72,10 +73,6 @@ def _cache_get(url: str) -> str | None:
     cache = _load_cache()
     entry = cache.get(url)
     if not entry:
-        return None
-    if (time.time() - entry.get("ts", 0)) > CACHE_TTL_SECS:
-        cache.pop(url, None)
-        _save_cache(cache)
         return None
     return entry.get("mirrored")
 
@@ -114,6 +111,27 @@ def _get_lemmy_jwt() -> str | None:
 
     return jwt
 
+def download_video(url: str) -> str | None:
+    """Downloads a video to DATA_DIR and returns the local path."""
+    output_template = str(DATA_DIR / "temp_video_%(id)s.%(ext)s")
+    cmd = [
+        "yt-dlp",
+        "-f", "bv*+ba/b",             # Merges the best video and best audio streams
+        "--merge-output-format", "mp4", # Ensures the output is an MP4
+        "--max-filesize", str(MAX_IMAGE_BYTES),
+        "-o", output_template,
+        url
+    ]
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        if result.returncode == 0:
+            # Logic to find the downloaded filename
+            for f in DATA_DIR.glob("temp_video_*"):
+                return str(f)
+    except Exception as e:
+        log(f"⚠️ Video download failed: {e}")
+    return None
 
 def mirror_url(url: str) -> str | None:
     """
@@ -133,43 +151,48 @@ def mirror_url(url: str) -> str | None:
     if cached:
         return cached
 
-    # Handle common video cases
-    if any(d in lower for d in VIDEO_DOMAINS):
-        labeled = f"[🎬 Watch video]({url})"
-        _cache_set(url, labeled)
-        return labeled
+    # Handle Videos by Downloading
+    is_video = any(d in lower for d in VIDEO_DOMAINS) or "v.redd.it" in lower or lower.endswith((".mp4", ".webm"))
 
-    if "v.redd.it" in lower:
-        labeled = f"[🎥 View Reddit video]({url})"
-        _cache_set(url, labeled)
-        return labeled
+    if is_video:
+        log(f"DEBUG: Attempting to download video from {url}")
+        local_path = download_video(url)
+        if local_path:
+            log(f"DEBUG: Video downloaded successfully to {local_path}")
+            with open(local_path, "rb") as f:
+                data = f.read()
+            os.remove(local_path) # Clean up temp file
+            # If a video was downloaded, we set 'data' and fall through to the upload logic
+        else:
+            log(f"DEBUG: Video download failed or exceeded size limit for {url}")
+            return None # Don't return a link; we want local hosting only
+    else:
+        # If not a video, handle as image
+        if "/pictrs/" in url:
+            _cache_set(url, url)
+            return url
 
-    if lower.endswith((".mp4", ".webm", ".mov")):
-        labeled = f"[🎬 Direct video link]({url})"
-        _cache_set(url, labeled)
-        return labeled
+        # Not an image
+        if not is_image_url(url) and not guess_imgur_direct(url):
+            return None
 
-    # If already Lemmy-hosted
-    if "/pictrs/" in url:
-        _cache_set(url, url)
-        return url
+        # Convert Imgur page to direct image
+        direct = guess_imgur_direct(url)
+        if direct:
+            url = direct
 
-    # Not an image
-    if not is_image_url(url) and not guess_imgur_direct(url):
-        return None
+        try:
+            r = requests.get(url, timeout=20)
+            r.raise_for_status()
+            data = r.content
+        except Exception as e:
+            log(f"⚠️ Failed to fetch image {url}: {e}")
+            return None
 
-    # Convert Imgur page to direct image
-    direct = guess_imgur_direct(url)
-    if direct:
-        url = direct
-
+    # Common Upload Logic (for both downloaded videos and images)
     try:
-        r = requests.get(url, timeout=20)
-        r.raise_for_status()
-        data = r.content
-
         if len(data) > MAX_IMAGE_BYTES:
-            log(f"⚠️ Skipping large image ({len(data)/1024/1024:.1f} MB): {url}")
+            log(f"⚠️ Skipping large file ({len(data)/1024/1024:.1f} MB): {url}")
             return None
 
         jwt = _get_lemmy_jwt()
@@ -181,6 +204,7 @@ def mirror_url(url: str) -> str | None:
         res = None
         field_names = ("images[]", "images", "file", "image")
         for key in field_names:
+            # Note: We use image/jpeg as a generic container; Lemmy/Pictrs usually detects actual type
             files = {key: ("upload.jpg", data, "image/jpeg")}
             res = requests.post(upload_url, files=files, headers=headers, timeout=30)
             if res.ok:
@@ -206,6 +230,6 @@ def mirror_url(url: str) -> str | None:
             return mirrored
 
     except Exception as e:
-        log(f"⚠️ mirror_url error for {url}: {e}")
+        log(f"⚠️ mirror_url upload error for {url}: {e}")
 
     return None

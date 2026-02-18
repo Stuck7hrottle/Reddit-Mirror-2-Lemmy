@@ -6,7 +6,7 @@ WORKDIR /opt/Reddit-Mirror-2-Lemmy
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git curl sqlite3 bash && \
+    git curl sqlite3 bash ffmpeg yt-dlp && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy project source

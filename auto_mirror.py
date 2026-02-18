@@ -32,6 +32,7 @@ import requests
 from job_queue import JobDB
 from db_cache import DB
 from comment_mirror import mirror_comment_to_lemmy
+from mirror_media import mirror_url
 
 logger = logging.getLogger(__name__)
 
@@ -222,13 +223,19 @@ def _get(obj, key, default=None):
     return getattr(obj, key, default)
 
 def build_media_block_from_submission(sub) -> tuple[str, str | None]:
+    """
+    Constructs a Lemmy post body by mirroring all Reddit media locally.
+    Ensures no outbound links to Reddit remain for images or videos.
+    """
+    from mirror_media import mirror_url
     body_parts, media_lines = [], []
 
+    # Extract and clean self-text
     st = to_md(_get(sub, "selftext", "") or "")
     if st.strip():
         body_parts.append(st)
 
-    # Gallery
+    # 1. Handle Reddit Galleries
     if bool(_get(sub, "is_gallery", False)) and _get(sub, "gallery_data") and _get(sub, "media_metadata"):
         try:
             items = _get(sub, "gallery_data", {}).get("items", [])[:MAX_GALLERY_IMAGES]
@@ -236,66 +243,47 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
             for idx, it in enumerate(items, 1):
                 media_id = it.get("media_id")
                 meta = media_meta.get(media_id, {})
+                
+                # Identify source URL
                 src = None
                 if isinstance(meta.get("s"), dict):
                     s = meta["s"]
                     src = s.get("u") or s.get("gif") or s.get("mp4")
-                # ✅ fallback to preview list if "s" missing
+                
+                # Fallback to preview if primary source is missing
                 if not src and isinstance(meta.get("p"), list) and meta["p"]:
                     src = meta["p"][-1].get("u")
-                # ✅ sanitize and stabilize Reddit image links
+                
                 if src:
-                    src = src.replace("&amp;", "&").split("?")[0]
-                    if "preview.redd.it" in src:
-                        src = src.replace("preview.redd.it", "i.redd.it")
-                caption = it.get("caption") or ""
-                if src:
-                    cap = f" — {md_escape(caption)}" if caption else ""
-                    media_lines.append(f"![Image {idx}]({src}){cap}")
+                    # Mirror to local infrastructure
+                    mirrored_src = mirror_url(src.replace("&amp;", "&"))
+                    if mirrored_src:
+                        caption = it.get("caption") or ""
+                        cap = f" — {md_escape(caption)}" if caption else ""
+                        media_lines.append(f"![Image {idx}]({mirrored_src}){cap}")
         except Exception as e:
-            log(f"⚠️ gallery parse failed: {e}")
+            log(f"⚠️ Gallery mirroring failed: {e}")
 
-    # Single image / imgur
-    url = _get(sub, "url", "") or ""
-    domain = _get(sub, "domain", "") or ""
-    if (domain in ("i.redd.it", "i.imgur.com") or is_image_url(url) or guess_imgur_direct(url)):
-        img = url
-        if img and not is_image_url(img):
-            guess = guess_imgur_direct(img)
-            if guess:
-                img = guess
-        if img:
-            img = img.replace("&amp;", "&").split("?")[0]
-            if "preview.redd.it" in img:
-                img = img.replace("preview.redd.it", "i.redd.it")
-            media_lines.append(f"![Image]({img})")
+    # 2. Handle Single Images and Videos
+    # Only process if not already handled as a gallery
+    elif not bool(_get(sub, "is_gallery", False)):
+        url = _get(sub, "url", "")
+        if url:
+            # Mirror the URL (mirror_url now handles video downloading/hosting)
+            mirrored_url = mirror_url(url)
+            if mirrored_url:
+                # Check extension for appropriate Markdown embedding
+                low_url = mirrored_url.lower()
+                if any(ext in low_url for ext in (".mp4", ".webm", ".mov")):
+                    media_lines.append(f"![Video Preview]({mirrored_url})")
+                else:
+                    media_lines.append(f"![Image]({mirrored_url})")
 
-    # Reddit hosted video (link out)
-    if domain == "v.redd.it" and _get(sub, "media"):
-        try:
-            rv = _get(sub, "media", {}).get("reddit_video") or {}
-            mp4 = rv.get("fallback_url")
-            if mp4:
-                media_lines.append(f"[🎬 View video on Reddit]({_get(sub, 'url', '')})")
-        except Exception:
-            pass
-
-    # External link (non-self)
-    if url and not _get(sub, "is_self", False) and not media_lines:
-        media_lines.append(f"[External link]({url})")
-
+    # Combine text and mirrored media
     if media_lines:
         if st.strip():
             body_parts.append("\n---\n")
         body_parts += media_lines
-
-    if EMBED_PERMALINK_FOOTER:
-        permalink = _get(sub, "permalink", None)
-        if permalink:
-            if not permalink.startswith("http"):
-                permalink = f"https://www.reddit.com{permalink}"
-            body_parts.append("\n\n---\n")
-            body_parts.append(f"🔗 **Source:** [View original post on Reddit]({permalink})")
 
     return ("\n".join(body_parts).strip(), None)
 
@@ -448,63 +436,80 @@ def _maybe_wait_between_posts():
         time.sleep(POST_COOLDOWN_SECS)
 
 def create_lemmy_post(subreddit_name, post, jwt, community_id):
+    """
+    Creates a Lemmy post using a 'no-loss' strategy. 
+    Media is embedded in the body to ensure local hosting and permanent accessibility.
+    """
     headers = {"Authorization": f"Bearer {jwt}"}
+    
     try:
-        body_md, link_override = build_media_block_from_submission(post)
+        # Construct the body with mirrored media links
+        # link_override is ignored to prevent outbound Reddit links
+        body_md, _ = build_media_block_from_submission(post)
     except Exception as e:
         log(f"⚠️ build_media_block_from_submission failed: {e}")
-        body_md, link_override = (post.get("selftext", ""), None)
+        body_md = post.get("selftext", "")
 
+    # Sanitize the title for Lemmy requirements
     title = _sanitize_title(post.get("title") or "Untitled", subreddit_name)
 
-    payload = {"name": title, "community_id": community_id}
-    if body_md:
-        payload["body"] = body_md
-    if link_override:
-        payload["url"] = link_override
+    # Construct the payload as a text post only
+    payload = {
+        "name": title, 
+        "community_id": community_id,
+        "body": body_md
+    }
 
     url = f"{LEMMY_URL}/api/v3/post"
 
-    # Retry loop with exponential backoff on rate limit
+    # Retry loop with exponential backoff for rate limits
     backoff = 10
     max_wait = 90
     attempts = 0
+    
     while True:
         attempts += 1
-        r = requests.post(url, json=payload, headers=headers, timeout=20)
-
-        # Auth retry
-        if r.status_code == 401:
-            log("⚠️ Lemmy returned 401, refreshing token once…")
-            new_jwt = lemmy_login(force=True)
-            headers["Authorization"] = f"Bearer {new_jwt}"
-            # one immediate retry on auth refresh
+        try:
             r = requests.post(url, json=payload, headers=headers, timeout=20)
 
-        text = r.text or ""
+            # Handle Authentication Expired
+            if r.status_code == 401:
+                log("⚠️ Lemmy returned 401, refreshing token...")
+                new_jwt = lemmy_login(force=True)
+                headers["Authorization"] = f"Bearer {new_jwt}"
+                continue
 
-        # Invalid title: try sanitize again (ensure minimum) then 1 retry
-        if r.status_code == 400 and "invalid_post_title" in text:
-            log("⚠️ Lemmy rejected title — sanitizing and retrying once…")
-            payload["name"] = _sanitize_title(payload["name"], subreddit_name) + " "
-            r = requests.post(url, json=payload, headers=headers, timeout=20)
+            text = r.text or ""
 
-        # Rate limit handling
-        if r.status_code == 400 and "rate_limit_error" in text:
-            wait = min(backoff, max_wait)
-            log(f"⏳ Lemmy rate-limited post — sleeping {wait}s (attempt {attempts})…")
-            time.sleep(wait)
-            backoff = int(backoff * 1.7) + 5
-            continue
+            # Handle Title Sanity
+            if r.status_code == 400 and "invalid_post_title" in text:
+                log("⚠️ Lemmy rejected title — applying extra sanitization...")
+                payload["name"] = _sanitize_title(payload["name"], subreddit_name) + " "
+                continue
 
-        if not r.ok:
-            raise RuntimeError(f"Lemmy post failed: {r.status_code} {text[:200]}")
+            # Handle Rate Limits
+            if r.status_code == 400 and "rate_limit_error" in text:
+                wait = min(backoff, max_wait)
+                log(f"⏳ Lemmy rate-limited post — sleeping {wait}s (attempt {attempts})...")
+                time.sleep(wait)
+                backoff = int(backoff * 1.7) + 5
+                continue
 
-        # Success
-        pid = r.json()["post_view"]["post"]["id"]
-        log(f"✅ Posted '{post.get('title','Untitled')}' → Lemmy ID={pid}")
-        _maybe_wait_between_posts()
-        return pid
+            if not r.ok:
+                raise RuntimeError(f"Lemmy post failed: {r.status_code} {text[:200]}")
+
+            # Successfully created
+            pid = r.json()["post_view"]["post"]["id"]
+            log(f"✅ Posted '{post.get('title','Untitled')}' → Lemmy ID={pid}")
+
+            _maybe_wait_between_posts()
+            return pid
+
+        except requests.exceptions.RequestException as e:
+            log(f"⚠️ Connection error to Lemmy: {e}")
+            if attempts >= 3:
+                raise
+            time.sleep(5)
 
 # ─────────────────────────────────────────────
 # COMMENTS
@@ -552,74 +557,14 @@ def mirror_comments(sub, post_id, comments, jwt):
 # ALT POST BODY (used by update_existing_posts)
 # ─────────────────────────────────────────────
 def build_post_body(sub):
-    if not isinstance(sub, dict):
-        sub = getattr(sub, "__dict__", {})
-
-    body = sub.get("selftext", "") or ""
-    url = sub.get("url", "")
-    domain = sub.get("domain", "")
-    title = sub.get("title", "Untitled Post")
-
-    video_domains = ("youtube.com", "youtu.be", "rumble.com", "odysee.com", "streamable.com", "v.redd.it")
-    image_domains = ("i.redd.it", "i.imgur.com", "imgur.com", "redd.it")
-    parts = []
-
-    parts.append(f"### {title}\n")
-
-    if any(d in url for d in video_domains):
-        if "youtu" in url:
-            embed = url.replace("watch?v=", "embed/").replace("youtu.be/", "youtube.com/embed/")
-            parts.append(f'<iframe width="560" height="315" src="{embed}" frameborder="0" allowfullscreen></iframe>\n')
-        elif "rumble.com" in url:
-            parts.append(f"[▶️ Watch on Rumble]({url})\n")
-        elif "odysee.com" in url:
-            parts.append(f"[▶️ Watch on Odysee]({url})\n")
-        elif "streamable.com" in url:
-            parts.append(f"[▶️ Watch on Streamable]({url})\n")
-        elif "v.redd.it" in url:
-            thumb = sub.get("thumbnail", "")
-            if thumb and thumb.startswith("http"):
-                parts.append(f"![Video thumbnail]({thumb})\n")
-            parts.append(f"[🎥 Watch Reddit Video]({url})\n")
-        elif url.lower().endswith((".mp4", ".webm", ".mov")):
-            parts.append(
-                f"<video controls width='100%'><source src='{url}' type='video/mp4'>Your browser does not support HTML5 video.</video>\n"
-            )
-        else:
-            parts.append(f"[▶️ Watch Video]({url})\n")
-    elif sub.get("is_gallery") and "media_metadata" in sub:
-        gallery = sub["media_metadata"]
-        parts.append("🖼️ **Gallery Preview:**\n\n")
-        count = 0
-        for _item_id, meta in gallery.items():
-            src = meta.get("s", {}).get("u") or meta.get("p", [{}])[-1].get("u", "")
-            caption = meta.get("caption", "")
-            if src:
-                parts.append(f"![{caption}]({src})\n")
-                if caption:
-                    parts.append(f"*{caption}*\n")
-            count += 1
-            if count % 2 == 0:
-                parts.append("\n")
-        parts.append(f"\n*View full gallery on [Reddit]({sub.get('permalink', '')})*\n")
-    elif any(d in url for d in image_domains):
-        parts.append(f"![media preview]({url})\n")
-        if "gallery" in url or "album" in url:
-            parts.append(f"*Gallery:* [View full post on Reddit]({sub.get('permalink', '')})\n")
-    elif url and not sub.get("is_self"):
-        parts.append(f"[Original Link]({url})\n")
-
-    if body.strip():
-        parts.append("\n---\n")
-        parts.append(body.strip())
-
-    permalink = sub.get("permalink")
-    if permalink:
-        if not permalink.startswith("http"):
-            permalink = f"https://www.reddit.com{permalink}"
-        parts.append(f"\n\n---\n[View original post on Reddit]({permalink})")
-
-    return "\n".join(parts).strip()
+    """
+    Standardizes the post body construction for both new mirrors and updates.
+    Ensures that all media is hosted locally and outbound Reddit links are stripped.
+    """
+    # Simply delegate to our primary mirroring logic to ensure consistency
+    # across the entire application.
+    content, _ = build_media_block_from_submission(sub)
+    return content
 
 # ─────────────────────────────────────────────
 # MIGRATION (legacy JSON → SQLite)
@@ -732,7 +677,8 @@ def update_existing_posts():
         conn.close()
         return
 
-    cur = conn.execute("SELECT reddit_post_id, lemmy_post_id FROM posts")
+    #cur = conn.execute("SELECT reddit_post_id, lemmy_post_id FROM posts")
+    cur = conn.execute("SELECT reddit_id, lemmy_id FROM posts")
     rows = cur.fetchall()
     conn.close()
 
