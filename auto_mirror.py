@@ -702,22 +702,31 @@ def update_existing_posts():
                 log(f"⚠️ Unable to fetch Reddit data for {reddit_id}")
                 continue
 
-            for key in ["is_gallery", "media_metadata", "thumbnail"]:
-                sub_data.setdefault(key, None)
-
-            # Force the ID to be a clean integer to satisfy Lemmy's API
+            # Ensure the ID is an integer
             try:
                 clean_id = int(str(post_id).strip())
             except ValueError:
                 log(f"❌ Skipping {reddit_id}: Lemmy ID '{post_id}' is not a valid number.")
                 continue
 
+            # FIX: Get the Title and the new Body
+            reddit_title = sub_data.get("title") or "Untitled"
+            # Sanitize title to meet Lemmy's requirements
+            clean_title = _sanitize_title(reddit_title, sub_data.get("subreddit", "mirror"))
             new_body = build_post_body(sub_data)
+
+            # FIX: Updated URL to use /post/update
             update_url = f"{LEMMY_URL}/api/v3/post"
-            payload = {"post_id": clean_id, "body": new_body}
-            
-            # Use POST instead of PUT (more compatible with Lemmy's v3 API)
-            r = requests.post(update_url, json=payload, headers=headers, timeout=20)
+
+            # FIX: Added "name" field to the payload
+            payload = {
+                "post_id": clean_id, 
+                "name": clean_title,  # This fixes the 'missing field name' error
+                "body": new_body
+            }
+
+            # Using PUT for update as per Lemmy v3 API
+            r = requests.put(update_url, json=payload, headers=headers, timeout=20)
 
             if r.status_code in (500, 502, 503):
                 time.sleep(5)
@@ -740,7 +749,6 @@ def update_existing_posts():
 
     duration = time.time() - start_time
     log(f"✨ Done — updated {success}/{len(all_entries)} posts in {duration:.1f}s.")
-
 # ─────────────────────────────────────────────
 # MIRROR CORE (called by worker)
 # ─────────────────────────────────────────────

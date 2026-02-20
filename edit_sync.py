@@ -45,10 +45,14 @@ def fetch_reddit_post(subreddit, post_id):
     data = r.json()[0]["data"]["children"][0]["data"]
     return data
 
-def update_lemmy_post(post_id, body, token):
-    r = requests.put(f"{LEMMY_INSTANCE}/api/v3/post/update",
+def update_lemmy_post(post_id, body, title, token): # Added title param
+    r = requests.put(f"{LEMMY_INSTANCE}/api/v3/post",
                      headers={"Authorization": f"Bearer {token}"},
-                     json={"post_id": post_id, "body": body}, timeout=10)
+                     json={
+                         "post_id": post_id, 
+                         "body": body,
+                         "name": title # This fixes the 'missing field name' error
+                     }, timeout=10)
     if r.status_code == 200:
         log(f"✅ Updated Lemmy post {post_id}")
     else:
@@ -84,7 +88,8 @@ def sync_subreddit(subreddit, token):
         if data.get("edited") or new_text != last_text:
             log(f"✏️ Post u/{data.get('author')} edited — updating Lemmy post {lemmy_post_id}")
             new_body = f"{new_text}\n\n---\n[Original Reddit post](https://reddit.com{data.get('permalink')})"
-            update_lemmy_post(lemmy_post_id, new_body, token)
+            post_title = data.get("title", "Updated Post")
+            update_lemmy_post(lemmy_post_id, new_body, post_title, token)
             entry["last_body"] = new_text
         mapping[rid] = entry
         checked += 1

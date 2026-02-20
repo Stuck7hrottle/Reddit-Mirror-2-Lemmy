@@ -48,6 +48,41 @@ VIDEO_DOMAINS = (
 
 _url_re = re.compile(r"https?://\S+")
 
+def _looks_like_html(data: bytes) -> bool:
+    if not data:
+        return True
+    head = data.lstrip()[:64].lower()
+    return (
+        head.startswith(b"<!doctype html")
+        or head.startswith(b"<html")
+        or head.startswith(b"<head")
+        or head.startswith(b"<body")
+    )
+
+def _sniff_media(data: bytes) -> tuple[str | None, str | None]:
+    if not data:
+        return (None, None)
+
+    # JPEG
+    if data.startswith(b"\xff\xd8\xff"):
+        return ("image.jpg", "image/jpeg")
+    # PNG
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ("image.png", "image/png")
+    # GIF
+    if data.startswith(b"GIF87a") or data.startswith(b"GIF89a"):
+        return ("image.gif", "image/gif")
+    # WEBP
+    if data.startswith(b"RIFF") and b"WEBP" in data[8:16]:
+        return ("image.webp", "image/webp")
+    # MP4-ish
+    if len(data) > 12 and data[4:8] == b"ftyp":
+        return ("video.mp4", "video/mp4")
+    # WebM/Matroska
+    if data.startswith(b"\x1a\x45\xdf\xa3"):
+        return ("video.webm", "video/webm")
+
+    return (None, None)
 
 # ───────────────────────────────
 # Cache helpers
@@ -188,8 +223,12 @@ def mirror_url(url: str) -> str | None:
         except Exception as e:
             log(f"⚠️ Failed to fetch image {url}: {e}")
             return None
+            
+        if _looks_like_html(data):
+            log(f"⚠️ Fetched HTML/non-media from {url}; skipping upload")
+            return None
 
-    # Common Upload Logic (for both downloaded videos and images)
+# Common Upload Logic (for both downloaded videos and images)
     try:
         if len(data) > MAX_IMAGE_BYTES:
             log(f"⚠️ Skipping large file ({len(data)/1024/1024:.1f} MB): {url}")
@@ -197,20 +236,25 @@ def mirror_url(url: str) -> str | None:
 
         jwt = _get_lemmy_jwt()
         headers = {"Authorization": f"Bearer {jwt}"} if jwt else {}
+        upload_base = os.getenv("LEMMY_UPLOAD_URL", LEMMY_URL).rstrip("/")
+        upload_url = f"{upload_base}/pictrs/image"
 
-        upload_url = f"{LEMMY_URL}/pictrs/image"
+        # Determine correct filename and MIME type from the actual bytes
+        filename, mimetype = _sniff_media(data)
+        if not filename:
+            log(f"⚠️ Unknown/invalid media bytes from {url}; first32={data[:32]!r}")
+            return None
 
-        # Try all known compatible field names for Lemmy pictrs
-        res = None
-        field_names = ("images[]", "images", "file", "image")
-        for key in field_names:
-            # Note: We use image/jpeg as a generic container; Lemmy/Pictrs usually detects actual type
-            files = {key: ("upload.jpg", data, "image/jpeg")}
-            res = requests.post(upload_url, files=files, headers=headers, timeout=30)
-            if res.ok:
-                break
-            else:
-                log(f"⚠️ Upload attempt failed with field '{key}' → {res.status_code}: {res.text[:80]}")
+        # Prefer images[] first, then fallback to images
+        files = {"images[]": (filename, data, mimetype)}
+
+        log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs...")
+        res = requests.post(upload_url, files=files, headers=headers, timeout=60)
+
+        if not res.ok:
+            log("DEBUG: 'images[]' field failed, trying 'images' fallback...")
+            files = {"images": (filename, data, mimetype)}
+            res = requests.post(upload_url, files=files, headers=headers, timeout=60)
 
         if not res or not res.ok:
             log(f"⚠️ Upload failed {getattr(res, 'status_code', '?')}: {getattr(res, 'text', '')[:150]}")
