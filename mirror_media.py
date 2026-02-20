@@ -39,7 +39,7 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 CACHE_PATH = DATA_DIR / "media_cache.json"
 CACHE_TTL_SECS = int(os.getenv("MEDIA_CACHE_TTL_SECS", str(99 * 365 * 3600)))  # 14 days
-MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(500 * 1024 * 1024)))    # 10 MB limit
+MAX_IMAGE_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(500 * 1024 * 1024)))    # 500 MB limit
 
 VIDEO_DOMAINS = (
     "youtube.com", "youtu.be", "rumble.com", "odysee.com",
@@ -239,22 +239,28 @@ def mirror_url(url: str) -> str | None:
         upload_base = os.getenv("LEMMY_UPLOAD_URL", LEMMY_URL).rstrip("/")
         upload_url = f"{upload_base}/pictrs/image"
 
-        # Determine correct filename and MIME type from the actual bytes
+        # Determine correct filename/MIME from actual bytes
         filename, mimetype = _sniff_media(data)
+        log(f"DEBUG: sniff => filename={filename} mimetype={mimetype} first12={data[:12]!r}")
         if not filename:
             log(f"⚠️ Unknown/invalid media bytes from {url}; first32={data[:32]!r}")
             return None
 
-        # Prefer images[] first, then fallback to images
-        files = {"images[]": (filename, data, mimetype)}
+        # Try the common pictrs multipart field names in order.
+        # Different deployments expect different keys.
+        field_candidates = ["image", "images[]", "images"]
+        res = None
 
-        log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs...")
-        res = requests.post(upload_url, files=files, headers=headers, timeout=60)
-
-        if not res.ok:
-            log("DEBUG: 'images[]' field failed, trying 'images' fallback...")
-            files = {"images": (filename, data, mimetype)}
+        for field in field_candidates:
+            files = {field: (filename, data, mimetype)}
+            log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs using field '{field}'...")
             res = requests.post(upload_url, files=files, headers=headers, timeout=60)
+
+            if res.ok:
+                break
+
+            # Log a short failure reason to see which field is accepted
+            log(f"DEBUG: field '{field}' failed: {res.status_code} {res.text[:150]}")
 
         if not res or not res.ok:
             log(f"⚠️ Upload failed {getattr(res, 'status_code', '?')}: {getattr(res, 'text', '')[:150]}")
