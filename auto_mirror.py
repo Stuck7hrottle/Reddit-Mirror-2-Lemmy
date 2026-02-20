@@ -705,10 +705,19 @@ def update_existing_posts():
             for key in ["is_gallery", "media_metadata", "thumbnail"]:
                 sub_data.setdefault(key, None)
 
+            # Force the ID to be a clean integer to satisfy Lemmy's API
+            try:
+                clean_id = int(str(post_id).strip())
+            except ValueError:
+                log(f"❌ Skipping {reddit_id}: Lemmy ID '{post_id}' is not a valid number.")
+                continue
+
             new_body = build_post_body(sub_data)
             update_url = f"{LEMMY_URL}/api/v3/post"
-            payload = {"post_id": post_id, "body": new_body}
-            r = requests.put(update_url, json=payload, headers=headers, timeout=20)
+            payload = {"post_id": clean_id, "body": new_body}
+            
+            # Use POST instead of PUT (more compatible with Lemmy's v3 API)
+            r = requests.post(update_url, json=payload, headers=headers, timeout=20)
 
             if r.status_code in (500, 502, 503):
                 time.sleep(5)
