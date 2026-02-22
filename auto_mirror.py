@@ -728,6 +728,21 @@ def update_existing_posts():
             # Using PUT for update as per Lemmy v3 API
             r = requests.put(update_url, json=payload, headers=headers, timeout=20)
 
+            text = r.text or ""
+
+            if r.status_code == 401:
+                log("⚠️ post/update 401, refreshing token…")
+                jwt = lemmy_login(force=True)
+                headers["Authorization"] = f"Bearer {jwt}"
+                r = requests.put(update_url, json=payload, headers=headers, timeout=20)
+                text = r.text or ""
+
+            if r.status_code == 400 and "rate_limit_error" in text:
+                # update endpoint rate limit
+                log("⏳ Lemmy rate-limited post/update — sleeping 30s…")
+                time.sleep(30)
+                continue
+
             if r.status_code in (500, 502, 503):
                 time.sleep(5)
                 continue
