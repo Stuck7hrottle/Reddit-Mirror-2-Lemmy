@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 mirror_media.py — shared helper for comment/post media mirroring
-──────────────────────────────────────────────────────────────────
-- Rehosts images/videos to Lemmy /pictrs via Lemmy's /pictrs/image endpoint
-- Downloads v.redd.it + direct .mp4/.webm when configured, then uploads to pictrs
-- Persistent caching in DATA_DIR/media_cache.json to avoid duplicate uploads
-- Production hardening: throttling, retries/backoff (rate_limit_error + 502/503/504),
-  long upload timeouts, streaming uploads for large videos, bounded image downloads
+
+Goals:
+- Rehost images to Lemmy Pictrs when feasible (stable, cached, throttled)
+- Rehost *some* videos (v.redd.it / direct mp4/webm) when feasible
+- Treat YouTube/large/long videos as external links (avoid yt-dlp JS runtime issues)
+- Persistent cache (DATA_DIR/media_cache.json) to avoid duplicate uploads
+- Avoid hammering pictrs / nginx with bridge-side throttling + retries
 """
 
 from __future__ import annotations
@@ -15,8 +18,8 @@ import json
 import os
 import random
 import re
-import subprocess
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -24,7 +27,7 @@ import requests
 
 # Pull shared helpers if available; fall back gracefully if not.
 try:
-    from auto_mirror import is_image_url, guess_imgur_direct, log
+    from auto_mirror import is_image_url, guess_imgur_direct, log  # type: ignore
 except Exception:
     def is_image_url(u: str) -> bool:
         return bool(re.search(r"\.(png|jpe?g|gif|webp)(\?.*)?$", u or "", re.I))
@@ -38,69 +41,74 @@ except Exception:
 
 # Try to import Lemmy token logic
 try:
-    from utils import get_valid_token  # expected signature: get_valid_token(username=..., password=...)
+    from utils import get_valid_token  # type: ignore
 except Exception:
-    get_valid_token = None
+    get_valid_token = None  # type: ignore
 
 
-# ─────────────────────────────────────────────
-# Config
-# ─────────────────────────────────────────────
 LEMMY_URL = os.getenv("LEMMY_URL", "https://fosscad.guncaddesigns.com").rstrip("/")
-UPLOAD_BASE = os.getenv("LEMMY_UPLOAD_URL", LEMMY_URL).rstrip("/")
-UPLOAD_URL = f"{UPLOAD_BASE}/pictrs/image"
+LEMMY_UPLOAD_URL = os.getenv("LEMMY_UPLOAD_URL", LEMMY_URL).rstrip("/")
 
 DATA_DIR = Path(os.getenv("DATA_DIR", "/opt/Reddit-Mirror-2-Lemmy/data"))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
+# Cache format:
+#   {
+#     "<src_url>": {"mirrored": "<pictrs_or_external>", "ts": <unix>, "status": "ok|fail", "reason": "..."}
+#   }
 CACHE_PATH = DATA_DIR / "media_cache.json"
 
-# Default 14 days (comment + behavior consistent)
-CACHE_TTL_SECS = int(os.getenv("MEDIA_CACHE_TTL_SECS", str(14 * 24 * 3600)))
+# Defaults (override in .env)
+MEDIA_CACHE_TTL_SECS = int(os.getenv("MEDIA_CACHE_TTL_SECS", str(14 * 24 * 3600)))  # 14 days
+MAX_MEDIA_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(500 * 1024 * 1024)))          # 500 MB
+MIN_UPLOAD_INTERVAL_SECS = float(os.getenv("MIN_UPLOAD_INTERVAL_SECS", "0.6"))
 
-# 500 MB default
-MAX_MEDIA_BYTES = int(os.getenv("MAX_IMAGE_BYTES", str(500 * 1024 * 1024)))
+UPLOAD_RETRY_MAX = int(os.getenv("UPLOAD_RETRY_MAX", "4"))
+UPLOAD_RETRY_BASE_SECS = float(os.getenv("UPLOAD_RETRY_BASE_SECS", "2.0"))
 
-# Upload pacing:
-# With Lemmy image:120/min, sustained rate is 2/sec -> 0.5s interval is appropriate.
-MIN_UPLOAD_INTERVAL_SECS = float(os.getenv("MIN_UPLOAD_INTERVAL_SECS", "0.5"))
-UPLOAD_JITTER_SECS = float(os.getenv("UPLOAD_JITTER_SECS", "0.35"))
+MEDIA_FETCH_TIMEOUT_SECS = float(os.getenv("MEDIA_FETCH_TIMEOUT_SECS", "30"))
+MEDIA_UPLOAD_TIMEOUT_SECS = float(os.getenv("MEDIA_UPLOAD_TIMEOUT_SECS", "90"))
 
-# Retry/backoff
-UPLOAD_MAX_ATTEMPTS = int(os.getenv("UPLOAD_MAX_ATTEMPTS", "8"))
-UPLOAD_BACKOFF_BASE = float(os.getenv("UPLOAD_BACKOFF_BASE", "2.0"))
-UPLOAD_BACKOFF_MAX = float(os.getenv("UPLOAD_BACKOFF_MAX", "60.0"))
+# If pictrs keeps failing with ffprobe errors for an item, stop re-trying it forever.
+FAIL_PERSIST_SECS = int(os.getenv("MEDIA_FAIL_PERSIST_SECS", str(45 * 24 * 3600)))  # 45 days
 
-# HTTP timeouts
-FETCH_TIMEOUT_SECS = float(os.getenv("FETCH_TIMEOUT_SECS", "20"))
-UPLOAD_CONNECT_TIMEOUT = float(os.getenv("UPLOAD_CONNECT_TIMEOUT", "10"))
-UPLOAD_READ_TIMEOUT = float(os.getenv("UPLOAD_READ_TIMEOUT", "1200"))  # 20 min
-
-# Video download behavior
-YT_DLP_TIMEOUT_SECS = int(os.getenv("YT_DLP_TIMEOUT_SECS", "180"))
-YT_DLP_ALLOW_AUDIO = os.getenv("YT_DLP_ALLOW_AUDIO", "true").lower() in ("1", "true", "yes", "y")
-
-VIDEO_DOMAINS = (
-    "youtube.com", "youtu.be", "rumble.com", "odysee.com",
-    "vimeo.com", "streamable.com",
+# Video policy:
+# - EXTERNAL_ONLY: YouTube, rumble, odysee, etc. (no yt-dlp)
+# - TRY_REHOST: v.redd.it or direct .mp4/.webm URLs
+EXTERNAL_VIDEO_DOMAINS = (
+    "youtube.com", "youtu.be", "rumble.com", "odysee.com", "vimeo.com",
+    "streamable.com", "twitch.tv", "kick.com"
 )
 
 _url_re = re.compile(r"https?://\S+")
 
-# Reuse connections for large batch runs
-_session = requests.Session()
-
-# Simple in-process throttle (works for single process; multiple procs should also pace via Lemmy limits)
+_session: Optional[requests.Session] = None
 _last_upload_ts = 0.0
 
-# Cache in-memory (loaded lazily once)
-_cache_loaded = False
-_cache: dict[str, dict] = {}
+
+@dataclass(frozen=True)
+class MirrorResult:
+    # If kind == "url", value is a URL to embed (pictrs or original direct)
+    # If kind == "md", value is a markdown snippet already (e.g., external link label)
+    kind: str
+    value: str
 
 
-# ─────────────────────────────────────────────
-# Utility / sniffing
-# ─────────────────────────────────────────────
+def _get_session() -> requests.Session:
+    global _session
+    if _session is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": "reddit-lemmy-bridge/1.0"})
+        _session = s
+    return _session
+
+
+def find_urls(text: str) -> list[str]:
+    if not text:
+        return []
+    return _url_re.findall(text)
+
+
 def _looks_like_html(data: bytes) -> bool:
     if not data:
         return True
@@ -114,7 +122,6 @@ def _looks_like_html(data: bytes) -> bool:
 
 
 def _sniff_media(data: bytes) -> Tuple[Optional[str], Optional[str]]:
-    """Best-effort type detection from bytes."""
     if not data:
         return (None, None)
 
@@ -140,90 +147,63 @@ def _sniff_media(data: bytes) -> Tuple[Optional[str], Optional[str]]:
     return (None, None)
 
 
-def _sniff_file(path: str) -> Tuple[Optional[str], Optional[str], bytes]:
-    """Read a tiny header and sniff media. Returns (filename, mimetype, header_bytes)."""
-    try:
-        with open(path, "rb") as f:
-            head = f.read(64)
-    except Exception:
-        return (None, None, b"")
-    filename, mimetype = _sniff_media(head)
-    return (filename, mimetype, head)
+def _jpeg_has_eoi(data: bytes) -> bool:
+    # Many truncated JPEGs start OK but are missing the EOI marker (FFD9)
+    return len(data) >= 2 and data[-2:] == b"\xff\xd9"
 
 
-def _is_video_url(url_lower: str) -> bool:
-    return (
-        any(d in url_lower for d in VIDEO_DOMAINS)
-        or "v.redd.it" in url_lower
-        or url_lower.endswith((".mp4", ".webm", ".mov"))
-    )
-
-
-# ─────────────────────────────────────────────
-# Cache
-# ─────────────────────────────────────────────
-def _load_cache_once() -> None:
-    global _cache_loaded, _cache
-    if _cache_loaded:
-        return
-    _cache_loaded = True
+def _load_cache() -> dict:
     if not CACHE_PATH.exists():
-        _cache = {}
-        return
+        return {}
     try:
         with open(CACHE_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            _cache = data if isinstance(data, dict) else {}
+            return json.load(f)
     except Exception:
-        _cache = {}
+        return {}
 
 
-def _save_cache() -> None:
-    tmp = CACHE_PATH.with_suffix(".json.tmp")
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(_cache, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        tmp.replace(CACHE_PATH)
-    except Exception as e:
-        log(f"⚠️ Failed to write media cache: {e}")
+def _save_cache(cache: dict) -> None:
+    tmp = CACHE_PATH.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(cache, f, indent=2, sort_keys=True)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(CACHE_PATH)
 
 
-def _cache_get(url: str) -> Optional[str]:
-    _load_cache_once()
-    entry = _cache.get(url)
-    if not isinstance(entry, dict):
+def _cache_get(url: str) -> Optional[dict]:
+    cache = _load_cache()
+    ent = cache.get(url)
+    if not ent:
         return None
-    mirrored = entry.get("mirrored")
-    ts = entry.get("ts")
-    if not mirrored:
-        return None
-    if isinstance(ts, (int, float)) and CACHE_TTL_SECS > 0:
-        if (time.time() - float(ts)) > CACHE_TTL_SECS:
+    ts = float(ent.get("ts") or 0)
+    status = ent.get("status") or "ok"
+    # ok entries expire by TTL; fail entries persist longer to prevent thrash
+    if status == "ok":
+        if time.time() - ts > MEDIA_CACHE_TTL_SECS:
             return None
-    return str(mirrored)
+    else:
+        if time.time() - ts > FAIL_PERSIST_SECS:
+            return None
+    return ent
 
 
-def _cache_set(url: str, mirrored: str) -> None:
-    _load_cache_once()
-    _cache[url] = {"mirrored": mirrored, "ts": time.time()}
-    _save_cache()
+def _cache_set_ok(url: str, mirrored: str) -> None:
+    cache = _load_cache()
+    cache[url] = {"mirrored": mirrored, "ts": time.time(), "status": "ok"}
+    _save_cache(cache)
 
 
-# ─────────────────────────────────────────────
-# Public helpers
-# ─────────────────────────────────────────────
-def find_urls(text: str) -> list[str]:
-    if not text:
-        return []
-    return _url_re.findall(text)
+def _cache_set_fail(url: str, reason: str) -> None:
+    cache = _load_cache()
+    cache[url] = {"mirrored": "", "ts": time.time(), "status": "fail", "reason": reason[:200]}
+    _save_cache(cache)
 
 
 def _get_lemmy_jwt() -> Optional[str]:
     """
-    Retrieves a valid Lemmy JWT via get_valid_token() if present,
-    falling back to environment variables if needed.
+    Retrieves a valid Lemmy JWT via get_valid_token() if available,
+    else falls back to env vars.
     """
     jwt = None
     if get_valid_token:
@@ -233,7 +213,7 @@ def _get_lemmy_jwt() -> Optional[str]:
                 password=os.getenv("LEMMY_COMMENT_PASS", os.getenv("LEMMY_PASS")),
             )
         except Exception as e:
-            log(f"⚠️ get_valid_token() failed: {e}")
+            log(f"⚠️ Failed to get_valid_token(): {e}")
 
     if not jwt:
         jwt = os.getenv("LEMMY_AUTH") or os.getenv("LEMMY_API_TOKEN")
@@ -241,80 +221,6 @@ def _get_lemmy_jwt() -> Optional[str]:
     return jwt
 
 
-# ─────────────────────────────────────────────
-# Download helpers
-# ─────────────────────────────────────────────
-def _download_to_bytes(url: str) -> Optional[bytes]:
-    """
-    Bounded download into memory (for images/small media).
-    Aborts if size exceeds MAX_MEDIA_BYTES.
-    """
-    try:
-        with _session.get(url, stream=True, timeout=FETCH_TIMEOUT_SECS) as r:
-            r.raise_for_status()
-
-            chunks: list[bytes] = []
-            total = 0
-            for chunk in r.iter_content(chunk_size=1024 * 64):
-                if not chunk:
-                    continue
-                total += len(chunk)
-                if total > MAX_MEDIA_BYTES:
-                    log(f"⚠️ Download exceeded MAX_MEDIA_BYTES ({MAX_MEDIA_BYTES}); aborting: {url}")
-                    return None
-                chunks.append(chunk)
-            data = b"".join(chunks)
-            return data
-    except Exception as e:
-        log(f"⚠️ Failed to fetch {url}: {e}")
-        return None
-
-
-def download_video(url: str) -> Optional[str]:
-    """
-    Downloads a video to DATA_DIR and returns the local path.
-    Uses yt-dlp. Enforces MAX_MEDIA_BYTES via --max-filesize.
-    """
-    output_template = str(DATA_DIR / "temp_video_%(id)s.%(ext)s")
-
-    # If audio is disallowed in your pictrs config, set YT_DLP_ALLOW_AUDIO=false
-    fmt = "bv*+ba/b" if YT_DLP_ALLOW_AUDIO else "bv*/b"
-
-    cmd = [
-        "yt-dlp",
-        "-f", fmt,
-        "--merge-output-format", "mp4",
-        "--max-filesize", str(MAX_MEDIA_BYTES),
-        "-o", output_template,
-        url,
-    ]
-
-    try:
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=YT_DLP_TIMEOUT_SECS,
-        )
-        if result.returncode != 0:
-            log(f"⚠️ yt-dlp failed ({result.returncode}) for {url}: {result.stderr.strip()[:200]}")
-            return None
-
-        # Pick the newest matching temp_video_* file
-        candidates = sorted(DATA_DIR.glob("temp_video_*"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if not candidates:
-            log(f"⚠️ yt-dlp reported success but no temp_video_* file found for {url}")
-            return None
-        return str(candidates[0])
-
-    except Exception as e:
-        log(f"⚠️ Video download failed: {e}")
-        return None
-
-
-# ─────────────────────────────────────────────
-# Upload helpers
-# ─────────────────────────────────────────────
 def _throttle_upload() -> None:
     global _last_upload_ts
     if MIN_UPLOAD_INTERVAL_SECS <= 0:
@@ -322,238 +228,205 @@ def _throttle_upload() -> None:
     now = time.time()
     wait = (_last_upload_ts + MIN_UPLOAD_INTERVAL_SECS) - now
     if wait > 0:
-        time.sleep(wait + random.uniform(0.0, max(0.0, UPLOAD_JITTER_SECS)))
+        time.sleep(wait)
     _last_upload_ts = time.time()
 
 
-def _is_rate_limited(res: requests.Response) -> bool:
-    # Lemmy typically returns {"error":"rate_limit_error"}
+def _fetch_bytes(url: str) -> Optional[bytes]:
+    s = _get_session()
     try:
-        j = res.json()
-        return isinstance(j, dict) and j.get("error") == "rate_limit_error"
-    except Exception:
-        return False
-
-
-def _retry_after_seconds(res: requests.Response) -> Optional[float]:
-    ra = res.headers.get("Retry-After")
-    if not ra:
-        return None
-    try:
-        return float(ra)
-    except Exception:
+        r = s.get(url, timeout=MEDIA_FETCH_TIMEOUT_SECS, allow_redirects=True)
+        r.raise_for_status()
+        data = r.content
+        if _looks_like_html(data):
+            return None
+        return data
+    except Exception as e:
+        log(f"⚠️ Failed to fetch media {url}: {e}")
         return None
 
 
-def _post_with_resilience(*, files, headers) -> requests.Response:
+def _upload_to_pictrs(filename: str, mimetype: str, data: bytes) -> Optional[str]:
     """
-    POST to Lemmy /pictrs/image with:
-      - throttle
-      - retries on rate_limit_error and transient upstream issues
-      - long timeouts
+    Uploads bytes to /pictrs/image and returns the public /pictrs/image/<file> URL on success.
+    Retries transient errors with backoff, and applies bridge-side throttling.
     """
-    last_res: Optional[requests.Response] = None
+    jwt = _get_lemmy_jwt()
+    headers = {"Authorization": f"Bearer {jwt}"} if jwt else {}
 
-    for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+    upload_url = f"{LEMMY_UPLOAD_URL}/pictrs/image"
+    s = _get_session()
+
+    # Pictrs deployments differ; this one accepts images[] (as you've seen).
+    field = "images[]"
+
+    attempt = 0
+    while attempt <= UPLOAD_RETRY_MAX:
+        attempt += 1
         _throttle_upload()
 
         try:
-            res = _session.post(
-                UPLOAD_URL,
-                files=files,
-                headers=headers,
-                timeout=(UPLOAD_CONNECT_TIMEOUT, UPLOAD_READ_TIMEOUT),
-            )
-            last_res = res
-        except requests.RequestException as e:
-            sleep_s = min(UPLOAD_BACKOFF_MAX, UPLOAD_BACKOFF_BASE * (2 ** (attempt - 1)))
-            sleep_s += random.uniform(0.0, 0.8)
-            log(f"⚠️ Upload network error ({e}); retrying in {sleep_s:.1f}s ({attempt}/{UPLOAD_MAX_ATTEMPTS})")
-            time.sleep(sleep_s)
-            continue
+            files = {field: (filename, data, mimetype)}
+            res = s.post(upload_url, files=files, headers=headers, timeout=MEDIA_UPLOAD_TIMEOUT_SECS)
 
-        if res.ok:
-            return res
+            # Success
+            if res.ok:
+                payload = res.json()
+                file_id = None
+                if isinstance(payload, dict):
+                    arr = payload.get("files") or []
+                    if arr and isinstance(arr[0], dict):
+                        file_id = arr[0].get("file")
+                if file_id:
+                    return f"{LEMMY_URL}/pictrs/image/{file_id}"
+                # If ok but no file id, treat as failure
+                return None
 
-        # Rate limit
-        if _is_rate_limited(res):
-            ra = _retry_after_seconds(res)
-            sleep_s = ra if ra is not None else min(UPLOAD_BACKOFF_MAX, UPLOAD_BACKOFF_BASE * (2 ** (attempt - 1)))
-            sleep_s += random.uniform(0.0, 0.8)
-            log(f"⏳ rate_limited; sleeping {sleep_s:.1f}s ({attempt}/{UPLOAD_MAX_ATTEMPTS})")
-            time.sleep(sleep_s)
-            continue
+            text = (res.text or "")[:300]
 
-        # Transient upstream (nginx/pictrs under load)
-        if res.status_code in (502, 503, 504):
-            sleep_s = min(UPLOAD_BACKOFF_MAX, UPLOAD_BACKOFF_BASE * (2 ** (attempt - 1)))
-            sleep_s += random.uniform(0.0, 0.8)
-            log(f"⚠️ Upstream {res.status_code}; retrying in {sleep_s:.1f}s ({attempt}/{UPLOAD_MAX_ATTEMPTS})")
-            time.sleep(sleep_s)
-            continue
+            # Hard failures that are not worth retrying
+            if res.status_code == 400:
+                # Too many frames => long video; don’t keep hammering
+                if "Too many frames" in text or "too many frames" in text:
+                    return "__TOO_MANY_FRAMES__"
+                # Lemmy/pictrs rate limit
+                if "rate_limit_error" in text:
+                    # treat as transient; backoff below
+                    pass
+                # ffprobe failures are often deterministic for the payload => stop after limited retries
+                if "ffprobe Failed" in text:
+                    # retry a couple times, but don't loop forever
+                    if attempt >= 2:
+                        return "__FFPROBE_FAILED__"
 
-        # Sometimes pictrs/Lemmy returns 500 transiently under load; retry a couple times
-        if res.status_code == 500 and attempt <= 2:
-            sleep_s = 5.0 + random.uniform(0.0, 1.0)
-            log(f"⚠️ 500 from upload endpoint; retrying once in {sleep_s:.1f}s")
-            time.sleep(sleep_s)
-            continue
+            # Transient infra issues
+            if res.status_code in (429, 500, 502, 503, 504):
+                pass
+            else:
+                # Other status codes: treat as non-transient
+                log(f"⚠️ Upload failed {res.status_code}: {text}")
+                return None
 
-        # Non-retriable: return immediately
-        return res
+            # Backoff for retry
+            backoff = UPLOAD_RETRY_BASE_SECS * (1.7 ** (attempt - 1))
+            backoff = min(backoff, 30.0)
+            backoff *= random.uniform(0.85, 1.20)
 
-    # Out of attempts
-    return last_res if last_res is not None else requests.Response()
+            if res.status_code == 429:
+                ra = res.headers.get("Retry-After")
+                if ra:
+                    try:
+                        backoff = max(backoff, float(ra))
+                    except Exception:
+                        pass
 
+            log(f"⚠️ {res.status_code} from upload endpoint; retrying in {backoff:.1f}s")
+            time.sleep(backoff)
 
-def _parse_pictrs_file_id(res: requests.Response) -> Optional[str]:
-    try:
-        payload = res.json()
-    except Exception:
-        return None
+        except Exception as e:
+            # Network / timeout errors: retry similarly
+            backoff = UPLOAD_RETRY_BASE_SECS * (1.7 ** (attempt - 1))
+            backoff = min(backoff, 30.0)
+            backoff *= random.uniform(0.85, 1.20)
+            log(f"⚠️ Upload exception: {e} — retrying in {backoff:.1f}s")
+            time.sleep(backoff)
 
-    if not isinstance(payload, dict):
-        return None
-
-    files_arr = payload.get("files") or []
-    if files_arr and isinstance(files_arr, list) and isinstance(files_arr[0], dict):
-        file_id = files_arr[0].get("file")
-        return str(file_id) if file_id else None
     return None
 
 
-# ─────────────────────────────────────────────
-# Main API
-# ─────────────────────────────────────────────
 def mirror_url(url: str) -> Optional[str]:
     """
-    Mirrors media URLs.
-    Returns:
-      - Lemmy /pictrs/image/<id> URL for images/videos (rehosted)
-      - None if unsupported or failed (caller decides how to handle)
+    Mirror or label media URLs.
+
+    Returns a *string* for backward compatibility:
+      - If rehosted: returns the pictrs URL (https://.../pictrs/image/<id>.<ext>)
+      - If external-only video: returns a markdown link string like "[Video](https://...)"
+      - If cannot process: returns None
+
+    NOTE:
+    - Because your callers currently assume mirror_url() returns a URL,
+      external link strings MUST be handled by the caller. See patch note below.
     """
     if not url:
         return None
 
-    url = url.strip()
+    # Cache hit?
+    ent = _cache_get(url)
+    if ent:
+        if ent.get("status") == "ok":
+            mirrored = ent.get("mirrored") or ""
+            if mirrored:
+                return mirrored
+        else:
+            # Permanent-ish fail
+            return None
+
     lower = url.lower()
 
-    # Cached already?
-    cached = _cache_get(url)
-    if cached:
-        return cached
-
-    # Already local?
+    # Already local
     if "/pictrs/" in lower:
-        _cache_set(url, url)
+        _cache_set_ok(url, url)
         return url
 
-    is_video = _is_video_url(lower)
+    # External-only videos (no yt-dlp)
+    if any(dom in lower for dom in EXTERNAL_VIDEO_DOMAINS):
+        md = f"[Video]({url})"
+        _cache_set_ok(url, md)
+        return md
 
-    # ── Videos: download to disk then stream upload
-    if is_video:
-        log(f"DEBUG: Attempting to download video from {url}")
-        local_path = download_video(url)
-        if not local_path:
-            log(f"DEBUG: Video download failed or exceeded size limit for {url}")
-            return None  # local hosting only
-        try:
-            file_size = os.path.getsize(local_path)
-            if file_size > MAX_MEDIA_BYTES:
-                log(f"⚠️ Skipping large video ({file_size/1024/1024:.1f} MB): {url}")
-                return None
+    # Direct videos we will TRY to rehost
+    is_direct_video = ("v.redd.it" in lower) or lower.endswith((".mp4", ".webm", ".mov"))
+    is_img = is_image_url(url) or bool(guess_imgur_direct(url))
 
-            filename, mimetype, head = _sniff_file(local_path)
-            log(f"DEBUG: sniff => filename={filename} mimetype={mimetype} first12={head[:12]!r}")
-            if not filename:
-                log(f"⚠️ Unknown/invalid video bytes from {url}; first32={head[:32]!r}")
-                return None
-
-            jwt = _get_lemmy_jwt()
-            headers = {"Authorization": f"Bearer {jwt}"} if jwt else {}
-
-            # Only supported field for Lemmy -> pictrs
-            field = "images[]"
-
-            with open(local_path, "rb") as fh:
-                files = {field: (filename, fh, mimetype)}
-                log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs using field '{field}'...")
-                res = _post_with_resilience(files=files, headers=headers)
-
-            if not res or not res.ok:
-                log(f"⚠️ Upload failed {getattr(res, 'status_code', '?')}: {(getattr(res, 'text', '') or '')[:150]}")
-                return None
-
-            file_id = _parse_pictrs_file_id(res)
-            if not file_id:
-                log("⚠️ Upload succeeded but could not parse file id from response.")
-                return None
-
-            mirrored = f"{LEMMY_URL}/pictrs/image/{file_id}"
-            _cache_set(url, mirrored)
-            log(f"📸 Uploaded → {mirrored}")
-            return mirrored
-
-        finally:
-            try:
-                if local_path and os.path.exists(local_path):
-                    os.remove(local_path)
-            except Exception:
-                pass
-
-    # ── Images: download bounded into memory then upload
-    # Only allow images (or imgur pages convertible to direct)
-    if not is_image_url(url) and not guess_imgur_direct(url):
+    # Only handle known image/video candidates
+    if not (is_direct_video or is_img):
         return None
 
+    # Imgur normalization
     direct = guess_imgur_direct(url)
     if direct:
         url = direct
 
-    data = _download_to_bytes(url)
+    data = _fetch_bytes(url)
     if not data:
-        return None
-
-    if _looks_like_html(data):
-        log(f"⚠️ Fetched HTML/non-media from {url}; skipping upload")
+        _cache_set_fail(url, "fetch_failed_or_html")
         return None
 
     if len(data) > MAX_MEDIA_BYTES:
-        log(f"⚠️ Skipping large file ({len(data)/1024/1024:.1f} MB): {url}")
+        _cache_set_fail(url, f"too_large_{len(data)}")
         return None
 
     filename, mimetype = _sniff_media(data)
     log(f"DEBUG: sniff => filename={filename} mimetype={mimetype} first12={data[:12]!r}")
-    if not filename:
-        log(f"⚠️ Unknown/invalid media bytes from {url}; first32={data[:32]!r}")
+
+    if not filename or not mimetype:
+        _cache_set_fail(url, "sniff_failed")
         return None
 
-    # Basic corruption guards (helps reduce ffprobe/processing errors)
-    if len(data) < 2048:
-        log(f"⚠️ Media too small ({len(data)} bytes); skipping: {url}")
-        return None
-    if filename == "image.jpg" and not data.rstrip().endswith(b"\xff\xd9"):
+    # Truncated JPEG guard (prevents many ffprobe-ish downstream issues)
+    if mimetype == "image/jpeg" and not _jpeg_has_eoi(data):
         log("⚠️ JPEG missing EOI marker (likely truncated); skipping")
+        _cache_set_fail(url, "jpeg_truncated_no_eoi")
         return None
 
-    jwt = _get_lemmy_jwt()
-    headers = {"Authorization": f"Bearer {jwt}"} if jwt else {}
+    log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs using field 'images[]'...")
+    uploaded = _upload_to_pictrs(filename, mimetype, data)
 
-    field = "images[]"
-    files = {field: (filename, data, mimetype)}
-    log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs using field '{field}'...")
-    res = _post_with_resilience(files=files, headers=headers)
+    # Special outcomes
+    if uploaded == "__TOO_MANY_FRAMES__":
+        # Fall back to external link so update run can proceed
+        md = f"[Video]({url})"
+        _cache_set_ok(url, md)
+        return md
 
-    if not res or not res.ok:
-        log(f"⚠️ Upload failed {getattr(res, 'status_code', '?')}: {(getattr(res, 'text', '') or '')[:150]}")
+    if uploaded == "__FFPROBE_FAILED__":
+        _cache_set_fail(url, "ffprobe_failed")
         return None
 
-    file_id = _parse_pictrs_file_id(res)
-    if not file_id:
-        log("⚠️ Upload succeeded but could not parse file id from response.")
-        return None
+    if uploaded:
+        log(f"📸 Uploaded → {uploaded}")
+        _cache_set_ok(url, uploaded)
+        return uploaded
 
-    mirrored = f"{LEMMY_URL}/pictrs/image/{file_id}"
-    _cache_set(url, mirrored)
-    log(f"📸 Uploaded → {mirrored}")
-    return mirrored
+    _cache_set_fail(url, "upload_failed")
+    return None

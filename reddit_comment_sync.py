@@ -66,10 +66,17 @@ def format_reddit_comment_body(comment):
         parts += ["", "📸 **Mirrored media:**"]
         for m in mirrored_links:
             # Check for video extensions to provide appropriate labeling
-            if any(ext in m.lower() for ext in (".mp4", ".webm", ".mov")):
-                parts.append(f"- [Video]({m})")
-            else:
-                parts.append(f"- ![Image]({m})")
+            for m in mirrored_links:
+                # If mirror_url returned markdown already, include it verbatim.
+                if m.startswith("[") and "](" in m:
+                    parts.append(f"- {m}")
+                    continue
+
+                low = m.lower()
+                if any(low.endswith(ext) for ext in (".mp4", ".webm", ".mov")):
+                    parts.append(f"- [Video]({m})")
+                else:
+                    parts.append(f"- ![Image]({m})")
 
     return "\n".join([p for p in parts if p]).strip()
 
@@ -77,13 +84,14 @@ def mirror_new_reddit_replies(force_backfill=False):
     db = DB()
     reddit = create_reddit_client()
 
-    # Load mirrored posts map (Reddit↔Lemmy)
+    # 🛠️ Configuration: Pull window from env, default to 30 days
+    sync_days = int(os.getenv("SYNC_WINDOW_DAYS", "30"))
+
+    # Replace the old 'SELECT ALL' block with this filtered version
     try:
-        conn = db._get_conn()
-        mirrored_posts = conn.execute("SELECT reddit_id, lemmy_id FROM posts").fetchall()
-        conn.close()
+        active_posts = db.get_active_posts(days=sync_days)
     except Exception as e:
-        log_error("reddit_comment_sync.load_posts", e)
+        log_error("reddit_comment_sync.load_active_posts", e)
         return
 
     # Use DB-based ignored posts tracking
@@ -91,8 +99,10 @@ def mirror_new_reddit_replies(force_backfill=False):
 
     # Use DB-based ignore comments tracking
     ignored_comments = set(db.get_ignored_comments())
+    
+    log(f"🔄 Syncing comments for {len(active_posts)} active posts (Window: {sync_days} days)")
 
-    for reddit_post_id, lemmy_post_id in mirrored_posts:
+    for reddit_post_id, lemmy_post_id in active_posts:
         # 🔒 Skip permanently ignored posts
         if reddit_post_id in ignored_posts:
             log(f"🚫 Permanently ignoring previously skipped post {reddit_post_id}")
@@ -221,8 +231,8 @@ def mirror_new_reddit_replies(force_backfill=False):
                         f"(r:{reddit_comment_id} → l:{lemmy_comment_id})")
 
                     # 🕒 Gentle per-comment delay
-                    import random
-                    time.sleep(2.5 + random.uniform(0.5, 1.5))
+                    #import random
+                    #time.sleep(2.5 + random.uniform(0.5, 1.5))
 
                 except Exception as e:
                     log_error("reddit_comment_sync.mirror_comment", e)

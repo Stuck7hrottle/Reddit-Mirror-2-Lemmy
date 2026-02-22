@@ -123,6 +123,36 @@ def save_json(path, data):
         f.flush()
         os.fsync(f.fileno())
     tmp.replace(p)
+    
+REDDIT_FAILS_FILE = DATA_DIR / "reddit_fetch_failures.json"
+REDDIT_FAIL_MAX = int(os.getenv("REDDIT_FAIL_MAX", "3"))
+
+def _load_reddit_fails():
+    try:
+        if REDDIT_FAILS_FILE.exists():
+            return json.loads(REDDIT_FAILS_FILE.read_text())
+    except Exception:
+        pass
+    return {}
+
+def _save_reddit_fails(d):
+    tmp = REDDIT_FAILS_FILE.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(d, indent=2))
+    tmp.replace(REDDIT_FAILS_FILE)
+
+def _mark_reddit_fail(reddit_id: str, reason: str):
+    d = _load_reddit_fails()
+    e = d.get(reddit_id, {})
+    e["count"] = int(e.get("count", 0)) + 1
+    e["ts"] = time.time()
+    e["reason"] = reason[:200]
+    d[reddit_id] = e
+    _save_reddit_fails(d)
+
+def _should_skip_reddit_id(reddit_id: str) -> bool:
+    d = _load_reddit_fails()
+    e = d.get(reddit_id)
+    return bool(e and int(e.get("count", 0)) >= REDDIT_FAIL_MAX)
 
 # ─────────────────────────────────────────────
 # TOKEN MGMT (23h reuse)
@@ -222,6 +252,18 @@ def _get(obj, key, default=None):
         return obj.get(key, default)
     return getattr(obj, key, default)
 
+def _append_mirrored_media_line(media_lines: list[str], mirrored: str, label: str = "Image") -> None:
+    # If mirror_url returned markdown already (e.g. "[Video](...)"), use it as-is.
+    if mirrored.startswith("[") and "](" in mirrored:
+        media_lines.append(mirrored)
+        return
+
+    low = mirrored.lower()
+    if any(low.endswith(ext) for ext in (".mp4", ".webm", ".mov")):
+        media_lines.append(f"[Video]({mirrored})")
+    else:
+        media_lines.append(f"![{label}]({mirrored})")
+
 def build_media_block_from_submission(sub) -> tuple[str, str | None]:
     """
     Constructs a Lemmy post body by mirroring all Reddit media locally.
@@ -260,7 +302,10 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
                     if mirrored_src:
                         caption = it.get("caption") or ""
                         cap = f" — {md_escape(caption)}" if caption else ""
-                        media_lines.append(f"![Image {idx}]({mirrored_src}){cap}")
+                        _append_mirrored_media_line(media_lines, mirrored_src, label=f"Image {idx}")
+                        if cap:
+                            # Append caption as text on the same line (keeps markdown valid)
+                            media_lines[-1] = f"{media_lines[-1]}{cap}"
         except Exception as e:
             log(f"⚠️ Gallery mirroring failed: {e}")
 
@@ -272,12 +317,7 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
             # Mirror the URL (mirror_url now handles video downloading/hosting)
             mirrored_url = mirror_url(url)
             if mirrored_url:
-                # Check extension for appropriate Markdown embedding
-                low_url = mirrored_url.lower()
-                if any(ext in low_url for ext in (".mp4", ".webm", ".mov")):
-                    media_lines.append(f"![Video Preview]({mirrored_url})")
-                else:
-                    media_lines.append(f"![Image]({mirrored_url})")
+                _append_mirrored_media_line(media_lines, mirrored_url, label="Image")
 
     # Combine text and mirrored media
     if media_lines:
@@ -696,9 +736,13 @@ def update_existing_posts():
     success = 0
 
     for reddit_id, post_id in all_entries.items():
+        if _should_skip_reddit_id(reddit_id):
+            log(f"⏭️ Skipping {reddit_id}: previously failed fetch >= {REDDIT_FAIL_MAX} times")
+            continue
         try:
-            sub_data = fetch_reddit_submission(reddit_id)
+            sub_data = fetch_reddit_submission(reddit_id)          
             if not sub_data:
+                _mark_reddit_fail(reddit_id, "no_data_returned")
                 log(f"⚠️ Unable to fetch Reddit data for {reddit_id}")
                 continue
 
@@ -709,16 +753,12 @@ def update_existing_posts():
                 log(f"❌ Skipping {reddit_id}: Lemmy ID '{post_id}' is not a valid number.")
                 continue
 
-            # FIX: Get the Title and the new Body
             reddit_title = sub_data.get("title") or "Untitled"
-            # Sanitize title to meet Lemmy's requirements
             clean_title = _sanitize_title(reddit_title, sub_data.get("subreddit", "mirror"))
             new_body = build_post_body(sub_data)
 
-            # FIX: Updated URL to use /post/update
             update_url = f"{LEMMY_URL}/api/v3/post"
 
-            # FIX: Added "name" field to the payload
             payload = {
                 "post_id": clean_id, 
                 "name": clean_title,  # This fixes the 'missing field name' error

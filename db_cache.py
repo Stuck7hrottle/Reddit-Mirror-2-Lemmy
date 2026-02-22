@@ -193,6 +193,22 @@ class DB:
                 "ignored_posts": ignored_posts,
                 "ignored_comments": ignored_comments,
             }
+            
+    def get_active_posts(self, days: int = 30) -> list[tuple[str, str]]:
+        """
+        Return (reddit_id, lemmy_id) for posts synced within the last N days.
+        Uses the last_synced column to determine activity.
+        """
+        query = """
+            SELECT reddit_id, lemmy_id 
+            FROM posts 
+            WHERE last_synced >= datetime('now', ?)
+        """
+        # SQLite uses a modifier like '-30 days'
+        window = f"-{days} days"
+        with self._lock, self._get_conn() as conn:
+            rows = conn.execute(query, (window,)).fetchall()
+            return [(r["reddit_id"], r["lemmy_id"]) for r in rows]
 
 if __name__ == "__main__":
     db = DB()
