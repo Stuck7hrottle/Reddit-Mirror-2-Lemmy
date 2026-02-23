@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 import requests
+import subprocess
 
 # Pull shared helpers if available; fall back gracefully if not.
 try:
@@ -68,6 +69,9 @@ UPLOAD_RETRY_BASE_SECS = float(os.getenv("UPLOAD_RETRY_BASE_SECS", "2.0"))
 
 MEDIA_FETCH_TIMEOUT_SECS = float(os.getenv("MEDIA_FETCH_TIMEOUT_SECS", "30"))
 MEDIA_UPLOAD_TIMEOUT_SECS = float(os.getenv("MEDIA_UPLOAD_TIMEOUT_SECS", "90"))
+
+YT_DLP_TIMEOUT_SECS = int(os.getenv("YT_DLP_TIMEOUT_SECS", "180"))
+YT_DLP_ALLOW_AUDIO = os.getenv("YT_DLP_ALLOW_AUDIO", "true").lower() in ("1", "true", "yes", "y")
 
 # If pictrs keeps failing with ffprobe errors for an item, stop re-trying it forever.
 FAIL_PERSIST_SECS = int(os.getenv("MEDIA_FAIL_PERSIST_SECS", str(45 * 24 * 3600)))  # 45 days
@@ -272,6 +276,47 @@ def _fetch_bytes(url: str, headers: Optional[dict] = None) -> Optional[bytes]:
     except Exception as e:
         log(f"⚠️ Failed to fetch media {url}: {e}")
         return None
+        
+def download_video(url: str) -> Optional[str]:
+    """
+    Downloads a video to DATA_DIR and returns the local path.
+    Uses yt-dlp. Enforces MAX_MEDIA_BYTES via --max-filesize.
+    """
+    output_template = str(DATA_DIR / "temp_video_%(id)s.%(ext)s")
+
+    # If audio is disallowed in your pictrs config, set YT_DLP_ALLOW_AUDIO=false
+    fmt = "bv*+ba/b" if YT_DLP_ALLOW_AUDIO else "bv*/b"
+
+    cmd = [
+        "yt-dlp",
+        "-f", fmt,
+        "--merge-output-format", "mp4",
+        "--max-filesize", str(MAX_MEDIA_BYTES),
+        "-o", output_template,
+        url,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=YT_DLP_TIMEOUT_SECS,
+        )
+        if result.returncode != 0:
+            log(f"⚠️ yt-dlp failed ({result.returncode}) for {url}: {result.stderr.strip()[:200]}")
+            return None
+
+        # Pick the newest matching temp_video_* file
+        candidates = sorted(DATA_DIR.glob("temp_video_*"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if not candidates:
+            log(f"⚠️ yt-dlp reported success but no temp_video_* file found for {url}")
+            return None
+        return str(candidates[0])
+
+    except Exception as e:
+        log(f"⚠️ Video download failed: {e}")
+        return None
 
 def _upload_to_pictrs(filename: str, mimetype: str, data: bytes) -> Optional[str]:
     """
@@ -364,15 +409,6 @@ def _upload_to_pictrs(filename: str, mimetype: str, data: bytes) -> Optional[str
 def mirror_url(url: str) -> Optional[str]:
     """
     Mirror or label media URLs.
-
-    Returns a *string* for backward compatibility:
-      - If rehosted: returns the pictrs URL (https://.../pictrs/image/<id>.<ext>)
-      - If external-only video: returns a markdown link string like "[Video](https://...)"
-      - If cannot process: returns None
-
-    NOTE:
-    - Because your callers currently assume mirror_url() returns a URL,
-      external link strings MUST be handled by the caller. See patch note below.
     """
     if not url:
         return None
@@ -380,7 +416,7 @@ def mirror_url(url: str) -> Optional[str]:
     lower = url.lower()
     src_url = url
 
-    # Cache hit?
+    # 1. Cache Check
     ent = _cache_get(url)
     if ent:
         if ent.get("status") == "ok":
@@ -388,55 +424,69 @@ def mirror_url(url: str) -> Optional[str]:
             if mirrored:
                 return mirrored
         else:
-            # Allow retry for v.redd.it landing-page failures (resolver might now succeed)
             reason = (ent.get("reason") or "")
-            if "v.redd.it" in url.lower() and reason == "fetch_failed_or_html":
-                pass  # treat as cache-miss; continue
+            if "v.redd.it" in lower and reason == "fetch_failed_or_html":
+                pass  # retry v.redd.it if it previously failed resolution
             else:
                 return None
 
-
-
-    # Already local
+    # 2. Already local check
     if "/pictrs/" in lower:
         _cache_set_ok(url, url)
         return url
 
-    # External-only videos (no yt-dlp)
+    # 3. YouTube/External Link Handling
+    # We check this BEFORE trying to download/upload
     if any(dom in lower for dom in EXTERNAL_VIDEO_DOMAINS):
         md = f"[Video]({url})"
         _cache_set_ok(url, md)
         return md
 
-    # Direct videos we will TRY to rehost
-    is_direct_video = ("v.redd.it" in lower) or lower.endswith((".mp4", ".webm", ".mov"))
+    # 4. Identification & Normalization
+    is_v_reddit = "v.redd.it" in lower
+    is_direct_video = lower.endswith((".mp4", ".webm", ".mov"))
     is_img = is_image_url(url) or bool(guess_imgur_direct(url))
 
-    # Only handle known image/video candidates
-    if not (is_direct_video or is_img):
+    # If it's none of these, we don't know how to mirror it
+    if not (is_v_reddit or is_direct_video or is_img):
         return None
 
     # Imgur normalization
-    direct = guess_imgur_direct(url)
-    if direct:
-        url = direct
+    direct_imgur = guess_imgur_direct(url)
+    if direct_imgur:
+        url = direct_imgur
 
     fetch_headers = None
 
-    # v.redd.it canonical URL is HTML; resolve to a direct MP4 first
-    if "v.redd.it" in lower and not url.lower().endswith((".mp4", ".webm", ".mov")):
-        resolved = _resolve_v_redd_it(url)
-        if resolved:
-            log(f"DEBUG: resolved v.redd.it → {resolved}")
-            url = resolved
-            fetch_headers = {"Referer": "https://www.reddit.com/"}
-        else:
-            # Can't resolve; do not drop media entirely — keep an external link
+    # 5. v.redd.it Handling (use yt-dlp like the old implementation)
+    if is_v_reddit:
+        log(f"DEBUG: v.redd.it detected; attempting yt-dlp download for {src_url}")
+        local_path = download_video(src_url)
+        if not local_path:
+            # If you prefer linking instead of failing hard, change return None -> return md
+            log(f"⚠️ yt-dlp failed for {src_url}; falling back to link")
             md = f"[Video]({src_url})"
             _cache_set_ok(src_url, md)
             return md
 
-    data = _fetch_bytes(url, headers=fetch_headers)
+        try:
+            with open(local_path, "rb") as f:
+                data = f.read()
+        finally:
+            # cleanup temp file
+            try:
+                os.remove(local_path)
+            except Exception:
+                pass
+
+        # NOTE: We already have `data`, so skip the HTTP fetch section below.
+        # We'll jump into sniff/upload by setting url to src_url for logging/caching purposes.
+        url = src_url
+        fetch_headers = None
+
+    # 6. Fetching & Uploading
+    if "data" not in locals() or data is None:
+        data = _fetch_bytes(url, headers=fetch_headers)
     if not data:
         _cache_set_fail(src_url, "fetch_failed_or_html")
         return None
@@ -446,24 +496,21 @@ def mirror_url(url: str) -> Optional[str]:
         return None
 
     filename, mimetype = _sniff_media(data)
-    log(f"DEBUG: sniff => filename={filename} mimetype={mimetype} first12={data[:12]!r}")
-
     if not filename or not mimetype:
         _cache_set_fail(src_url, "sniff_failed")
         return None
 
-    # Truncated JPEG guard (prevents many ffprobe-ish downstream issues)
+    # JPEG Integrity check
     if mimetype == "image/jpeg" and not _jpeg_has_eoi(data):
-        log("⚠️ JPEG missing EOI marker (likely truncated); skipping")
         _cache_set_fail(src_url, "jpeg_truncated_no_eoi")
         return None
 
-    log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs using field 'images[]'...")
+    # Perform the Upload
     uploaded = _upload_to_pictrs(filename, mimetype, data)
 
-    # Special outcomes
+    # 7. Post-Upload Handling
     if uploaded == "__TOO_MANY_FRAMES__":
-        # Fall back to external link so update run can proceed
+        # If Pictrs rejects it for length, use a link instead of failing
         md = f"[Video]({src_url})"
         _cache_set_ok(src_url, md)
         return md
@@ -477,5 +524,6 @@ def mirror_url(url: str) -> Optional[str]:
         _cache_set_ok(src_url, uploaded)
         return uploaded
 
-    _cache_set_fail(url, "upload_failed")
+    # Final fallback if upload fails for unknown reasons
+    _cache_set_fail(src_url, "upload_failed")
     return None
