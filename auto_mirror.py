@@ -271,6 +271,7 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
     """
     from mirror_media import mirror_url
     body_parts, media_lines = [], []
+    primary_url: str | None = None
 
     # Extract and clean self-text
     st = to_md(_get(sub, "selftext", "") or "")
@@ -317,7 +318,17 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
             # Mirror the URL (mirror_url now handles video downloading/hosting)
             mirrored_url = mirror_url(url)
             if mirrored_url:
-                _append_mirrored_media_line(media_lines, mirrored_url, label="Image")
+                # If mirror_url returns markdown (e.g. "[Video](...)"), keep it in the body.
+                is_markdown = mirrored_url.lstrip().startswith("[")
+                is_pictrs = ("/pictrs/" in mirrored_url)
+
+                # If it's a locally-hosted pictrs URL, prefer embedding via the post "url" field.
+                if (not is_markdown) and is_pictrs:
+                    primary_url = mirrored_url
+                    # Optional: also show it in the body; I'd recommend NOT duplicating:
+                    # _append_mirrored_media_line(media_lines, mirrored_url, label="Media")
+                else:
+                    _append_mirrored_media_line(media_lines, mirrored_url, label="Media")
 
     # Combine text and mirrored media
     if media_lines:
@@ -325,7 +336,7 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
             body_parts.append("\n---\n")
         body_parts += media_lines
 
-    return ("\n".join(body_parts).strip(), None)
+    return ("\n".join(body_parts).strip(), primary_url)
 
 # ─────────────────────────────────────────────
 # COMMUNITY CACHE + LOOKUP
@@ -485,7 +496,7 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
     try:
         # Construct the body with mirrored media links
         # link_override is ignored to prevent outbound Reddit links
-        body_md, _ = build_media_block_from_submission(post)
+        body_md, primary_url = build_media_block_from_submission(post)
     except Exception as e:
         log(f"⚠️ build_media_block_from_submission failed: {e}")
         body_md = post.get("selftext", "")
@@ -495,10 +506,15 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
 
     # Construct the payload as a text post only
     payload = {
-        "name": title, 
+        "name": title,
         "community_id": community_id,
-        "body": body_md
+        "body": body_md,
     }
+
+    # If we mirrored a primary media URL (e.g., pictrs-hosted mp4),
+    # set it as the post URL so Lemmy frontends can embed it.
+    if primary_url:
+        payload["url"] = primary_url
 
     url = f"{LEMMY_URL}/api/v3/post"
 
@@ -755,7 +771,7 @@ def update_existing_posts():
 
             reddit_title = sub_data.get("title") or "Untitled"
             clean_title = _sanitize_title(reddit_title, sub_data.get("subreddit", "mirror"))
-            new_body = build_post_body(sub_data)
+            new_body, primary_url = build_media_block_from_submission(sub_data)
 
             update_url = f"{LEMMY_URL}/api/v3/post"
 
@@ -764,6 +780,9 @@ def update_existing_posts():
                 "name": clean_title,  # This fixes the 'missing field name' error
                 "body": new_body
             }
+            
+            if primary_url:
+                payload["url"] = primary_url
 
             # Using PUT for update as per Lemmy v3 API
             r = requests.put(update_url, json=payload, headers=headers, timeout=20)
