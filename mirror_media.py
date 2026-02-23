@@ -231,11 +231,39 @@ def _throttle_upload() -> None:
         time.sleep(wait)
     _last_upload_ts = time.time()
 
+def _resolve_v_redd_it(url: str) -> Optional[str]:
+    m = re.match(r"^https?://v\.redd\.it/([^/?#]+)/?", url or "", re.I)
+    if not m:
+        return None
 
-def _fetch_bytes(url: str) -> Optional[bytes]:
+    base = f"https://v.redd.it/{m.group(1)}"
+    candidates = [
+        "DASH_1080.mp4","DASH_720.mp4","DASH_480.mp4","DASH_360.mp4","DASH_240.mp4","DASH_144.mp4",
+        # add a few more common small renditions:
+        "DASH_96.mp4","DASH_120.mp4","DASH_270.mp4",
+    ]
+
+    s = _get_session()
+    hdrs = {"Referer": "https://www.reddit.com/", "Range": "bytes=0-0"}
+
+    for fname in candidates:
+        direct = f"{base}/{fname}"
+        try:
+            r = s.get(direct, allow_redirects=True, timeout=min(10.0, MEDIA_FETCH_TIMEOUT_SECS),
+                      headers=hdrs, stream=True)
+            if r.status_code in (200, 206):
+                ct = (r.headers.get("content-type") or "").lower()
+                if ct.startswith("video/") or "mp4" in ct:
+                    return direct
+        except Exception:
+            continue
+
+    return None
+    
+def _fetch_bytes(url: str, headers: Optional[dict] = None) -> Optional[bytes]:
     s = _get_session()
     try:
-        r = s.get(url, timeout=MEDIA_FETCH_TIMEOUT_SECS, allow_redirects=True)
+        r = s.get(url, timeout=MEDIA_FETCH_TIMEOUT_SECS, allow_redirects=True, headers=headers)
         r.raise_for_status()
         data = r.content
         if _looks_like_html(data):
@@ -244,7 +272,6 @@ def _fetch_bytes(url: str) -> Optional[bytes]:
     except Exception as e:
         log(f"⚠️ Failed to fetch media {url}: {e}")
         return None
-
 
 def _upload_to_pictrs(filename: str, mimetype: str, data: bytes) -> Optional[str]:
     """
@@ -349,6 +376,9 @@ def mirror_url(url: str) -> Optional[str]:
     """
     if not url:
         return None
+        
+    lower = url.lower()
+    src_url = url
 
     # Cache hit?
     ent = _cache_get(url)
@@ -358,10 +388,14 @@ def mirror_url(url: str) -> Optional[str]:
             if mirrored:
                 return mirrored
         else:
-            # Permanent-ish fail
-            return None
+            # Allow retry for v.redd.it landing-page failures (resolver might now succeed)
+            reason = (ent.get("reason") or "")
+            if "v.redd.it" in url.lower() and reason == "fetch_failed_or_html":
+                pass  # treat as cache-miss; continue
+            else:
+                return None
 
-    lower = url.lower()
+
 
     # Already local
     if "/pictrs/" in lower:
@@ -387,26 +421,41 @@ def mirror_url(url: str) -> Optional[str]:
     if direct:
         url = direct
 
-    data = _fetch_bytes(url)
+    fetch_headers = None
+
+    # v.redd.it canonical URL is HTML; resolve to a direct MP4 first
+    if "v.redd.it" in lower and not url.lower().endswith((".mp4", ".webm", ".mov")):
+        resolved = _resolve_v_redd_it(url)
+        if resolved:
+            log(f"DEBUG: resolved v.redd.it → {resolved}")
+            url = resolved
+            fetch_headers = {"Referer": "https://www.reddit.com/"}
+        else:
+            # Can't resolve; do not drop media entirely — keep an external link
+            md = f"[Video]({src_url})"
+            _cache_set_ok(src_url, md)
+            return md
+
+    data = _fetch_bytes(url, headers=fetch_headers)
     if not data:
-        _cache_set_fail(url, "fetch_failed_or_html")
+        _cache_set_fail(src_url, "fetch_failed_or_html")
         return None
 
     if len(data) > MAX_MEDIA_BYTES:
-        _cache_set_fail(url, f"too_large_{len(data)}")
+        _cache_set_fail(src_url, f"too_large_{len(data)}")
         return None
 
     filename, mimetype = _sniff_media(data)
     log(f"DEBUG: sniff => filename={filename} mimetype={mimetype} first12={data[:12]!r}")
 
     if not filename or not mimetype:
-        _cache_set_fail(url, "sniff_failed")
+        _cache_set_fail(src_url, "sniff_failed")
         return None
 
     # Truncated JPEG guard (prevents many ffprobe-ish downstream issues)
     if mimetype == "image/jpeg" and not _jpeg_has_eoi(data):
         log("⚠️ JPEG missing EOI marker (likely truncated); skipping")
-        _cache_set_fail(url, "jpeg_truncated_no_eoi")
+        _cache_set_fail(src_url, "jpeg_truncated_no_eoi")
         return None
 
     log(f"DEBUG: Uploading {filename} ({mimetype}) to Pictrs using field 'images[]'...")
@@ -415,17 +464,17 @@ def mirror_url(url: str) -> Optional[str]:
     # Special outcomes
     if uploaded == "__TOO_MANY_FRAMES__":
         # Fall back to external link so update run can proceed
-        md = f"[Video]({url})"
-        _cache_set_ok(url, md)
+        md = f"[Video]({src_url})"
+        _cache_set_ok(src_url, md)
         return md
 
     if uploaded == "__FFPROBE_FAILED__":
-        _cache_set_fail(url, "ffprobe_failed")
+        _cache_set_fail(src_url, "ffprobe_failed")
         return None
 
     if uploaded:
         log(f"📸 Uploaded → {uploaded}")
-        _cache_set_ok(url, uploaded)
+        _cache_set_ok(src_url, uploaded)
         return uploaded
 
     _cache_set_fail(url, "upload_failed")
