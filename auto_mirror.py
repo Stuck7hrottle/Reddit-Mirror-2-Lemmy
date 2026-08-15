@@ -934,8 +934,24 @@ def mirror_once(subreddit_name: str, test_mode: bool = False):
         if after:
             params["after"] = after
 
+        # 1. Use the configured User-Agent from .env
+        user_agent = os.getenv("REDDIT_USER_AGENT", "RedditToLemmyBridge/1.1")
+        headers = {"User-Agent": user_agent}
+
+        # 2. Authenticate the request via OAuth to bypass 403 limits
+        client_id = os.getenv("REDDIT_CLIENT_ID")
+        client_secret = os.getenv("REDDIT_CLIENT_SECRET")
         url = f"https://www.reddit.com/r/{subreddit_name}/new.json"
-        headers = {"User-Agent": "RedditToLemmyBridge/1.1 (by u/YourBotName)"}
+        
+        if client_id and client_secret:
+            token_url = "https://www.reddit.com/api/v1/access_token"
+            auth = requests.auth.HTTPBasicAuth(client_id, client_secret)
+            token_res = requests.post(token_url, auth=auth, data={"grant_type": "client_credentials"}, headers=headers, timeout=15)
+            if token_res.ok:
+                token = token_res.json().get("access_token")
+                headers["Authorization"] = f"bearer {token}"
+                url = f"https://oauth.reddit.com/r/{subreddit_name}/new.json"
+
         # --- enhanced rate-limit handling ---
         for attempt in range(5):
             r = requests.get(url, params=params, headers=headers, timeout=20)
@@ -955,7 +971,17 @@ def mirror_once(subreddit_name: str, test_mode: bool = False):
             break
         # --- end patch ---
 
-        data = r.json().get("data", {})
+        # 3. FIX: Stop gracefully if the request failed instead of crashing on JSON parse
+        if not r.ok:
+            print(f"⏭️ Skipping r/{subreddit_name} due to failed API response.")
+            break
+            
+        try:
+            data = r.json().get("data", {})
+        except Exception as e:
+            print(f"⚠️ Failed to parse JSON for r/{subreddit_name}: {e}")
+            break
+
         children = data.get("children", [])
         if not children:
             break
