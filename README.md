@@ -171,6 +171,44 @@ Every web server between the bridge and pict-rs must also accept the file size
 `MEDIA_UPLOAD_TIMEOUT_SECS` (default 600) longer than pict-rs takes to transcode,
 or the bridge will give up and upload the same video again.
 
+### 📺 Mirroring Odysee Channels
+
+`odysee_mirror.py` mirrors Odysee channels into Lemmy communities, one community
+per channel. Each upload becomes a link post: its title, its Odysee page as the
+link (Lemmy shows the thumbnail and preview), the creator's description, and a
+credit line. Videos and files are linked, not copied. It reads Odysee's public
+API, so a channel's whole history is available, and keeps its own record of
+what it has posted (separate from the Reddit records).
+
+**1. Create the community** in Lemmy (names: lowercase letters, numbers and
+underscores, 20 characters max), e.g. `hoffman_odysee`.
+
+**2. Map channels to communities** in `.env`. The channel is the `@name:id`
+part of its Odysee address:
+
+```
+ODYSEE_MAP=@hoffmantactical:3=hoffman_odysee
+ODYSEE_BACKFILL=true          # first run: mirror the whole history, oldest first
+ODYSEE_INTERVAL_SECS=3600     # then check for new uploads hourly
+ODYSEE_POST_DELAY_SECS=10     # pause between posts
+```
+
+**3. Preview, then try a few** (from the worker container; `-e` passes the map
+before the service exists):
+
+```bash
+docker exec -e ODYSEE_MAP=@hoffmantactical:3=hoffman_odysee reddit_mirror_worker python3 odysee_mirror.py --dry-run
+docker exec -e ODYSEE_MAP=@hoffmantactical:3=hoffman_odysee reddit_mirror_worker python3 odysee_mirror.py --once --limit 5
+```
+
+**4. Run it continuously** by adding the `odysee-mirror` service from
+`examples/docker-compose.yml` to your `docker-compose.yml`, then
+`docker compose up -d --build odysee-mirror`. Progress shows on the dashboard's
+Logs page (lines start with 📺).
+
+Before mirroring someone else's channel, it's worth checking they're happy with
+it; every post credits and links back to them.
+
 ### 💾 Backups and Logs
 
 `data/jobs.db` is the one file that can't be rebuilt: it records which Reddit

@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- `odysee_mirror.py`: mirrors Odysee channels into Lemmy communities as link posts (title, Odysee link and thumbnail, description, credit line). Reads Odysee's API, so a channel's whole history can be backfilled oldest first; then checks for new uploads. Dry-run and `--limit` modes; its own records, separate from Reddit's
+- `core/models.py` (shared post/comment format, from the multi-source-bridge branch) and `sources/odysee.py`, the first non-Reddit source
+
 ### Fixed
 - repair_posts.py stopped silently partway through a long run: any Reddit error (or the access token expiring) ended it. It now renews the token before it expires and on 401, waits out 429/5xx/connection errors, treats a single post's 403/404 as gone, pauses 5 then 15 minutes if Reddit is down before stopping cleanly, and carries on past an unexpected error on one post (reported, and retried on the next run). Any fatal error is written to bridge.log. `touch data/repair.stop` stops a background run cleanly
 - Direct v.redd.it downloads failed on ffmpeg 7.1+: Reddit's audio segments are named .aac but contain MPEG-TS, which newer ffmpeg rejects ("mismatches allowed extensions"). ffmpeg is now told to accept them (`-extension_picky 0`, retried without on older ffmpeg)

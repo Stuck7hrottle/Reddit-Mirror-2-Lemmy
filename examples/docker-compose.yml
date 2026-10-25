@@ -41,6 +41,21 @@ services:
     #networks:
     #  - your_lemmy_network
 
+  # Odysee channels → Lemmy communities (see README, "Mirroring Odysee Channels")
+  odysee-mirror:
+    build: .
+    container_name: odysee_mirror
+    command: python3 odysee_mirror.py
+    restart: unless-stopped
+    volumes:
+      - ./data:/opt/Reddit-Mirror-2-Lemmy/data
+      - ./logs:/opt/Reddit-Mirror-2-Lemmy/logs
+    env_file:
+      - .env
+    # Uncomment below if you want to connect to your Lemmy-Ansible Docker network
+    #networks:
+    #  - your_lemmy_network
+
   mirror-dashboard:
     build:
       context: ./dashboard
