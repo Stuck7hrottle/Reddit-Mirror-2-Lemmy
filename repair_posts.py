@@ -283,6 +283,9 @@ def repair_one(post_id: int, kind: str, sub: dict, action: str, jwt: str) -> str
     body, url = am.build_media_block_from_submission(sub)
     if not (body or "").strip() and not url:
         return "left alone: nothing could be recovered"
+    if not url and not VIDEO_FALLBACK.sub("", body or "").strip(" \n-"):
+        # All we'd add is a link back to the Reddit video: not a repair
+        return "left alone: video couldn't be downloaded"
     ok, detail = edit_post(post_id, current["name"], body if (body or "").strip() else None, url, jwt)
     return f"fixed: {action}" if ok else f"failed: {detail}"
 
