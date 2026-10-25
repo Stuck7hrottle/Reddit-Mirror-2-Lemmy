@@ -240,7 +240,10 @@ docker exec -d reddit_mirror_worker python3 repair_posts.py
 ```
 
 Progress is saved in `data/repair_progress.json`, so if it's interrupted, run
-step 3 again and it continues where it stopped. `--limit 20` stops after 20
+step 3 again and it continues where it stopped. To stop a background run, create
+`data/repair.stop` (`touch data/repair.stop`); it stops before the next batch.
+If Reddit is down it pauses and retries, and one failing post never ends the
+run: it's reported and retried next time. `--limit 20` stops after 20
 edits, handy for a first look.
 
 ### ⚙️ Configuration Reference
