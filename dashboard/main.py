@@ -62,7 +62,7 @@ app = FastAPI(title="Reddit–Lemmy Mirror Dashboard")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Bump when CSS/JS/fonts change: nginx tells browsers to cache /dashboard/static for 7 days
-templates.env.globals["static_version"] = "2"
+templates.env.globals["static_version"] = "3"
 templates.env.filters["thousands"] = lambda n: f"{n:,}" if isinstance(n, int) else n
 # ✅ Mount static assets at /dashboard/static
 app.mount("/dashboard/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -249,7 +249,8 @@ def log_activity(now: datetime):
         slot = min(23, int((ts - window_start).total_seconds() // 3600))
         (posts if kind == "post" else comments)[slot] += 1
 
-    hours = [(window_start + timedelta(hours=i)).strftime("%H") for i in range(24)]
+    # Log times are the containers' clock (UTC unless TZ is set), labelled as such
+    hours = [(window_start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:00:00") for i in range(24)]
     return {"hours": hours, "posts": posts, "comments": comments}, last
 
 
@@ -317,6 +318,61 @@ def db_stats():
     return out
 
 
+def db_activity(now_utc: datetime):
+    """
+    Hourly posts/comments mirrored in the last 24 hours, from the created_at
+    timestamp each row gets when it's first saved (SQLite CURRENT_TIMESTAMP, UTC).
+
+    This works whichever logger a worker uses: the post worker only prints to
+    its console, so its posts never appear in bridge.log.
+    Returns None if the tables or timestamps aren't there (very old installs).
+    """
+    db_path = DATA_DIR / "jobs.db"
+    if not db_path.exists():
+        return None
+    window_start = (now_utc - timedelta(hours=23)).replace(minute=0, second=0, microsecond=0)
+    cutoff = window_start.strftime("%Y-%m-%d %H:%M:%S")
+    series = {"posts": [0] * 24, "comments": [0] * 24}
+    last = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return None
+    try:
+        for table in ("posts", "comments"):
+            cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+            if "created_at" not in cols:
+                return None
+            # Rows are only ever appended, so the newest are the highest ids.
+            # Looking at the last 200k ids keeps this fast on a big table.
+            rows = conn.execute(
+                f"SELECT created_at FROM {table} "
+                f"WHERE id > (SELECT IFNULL(MAX(id), 0) - 200000 FROM {table}) AND created_at >= ?",
+                (cutoff,),
+            ).fetchall()
+            for (value,) in rows:
+                try:
+                    ts = datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                slot = int((ts - window_start).total_seconds() // 3600)
+                if 0 <= slot < 24:
+                    series[table][slot] += 1
+            latest = conn.execute(f"SELECT MAX(created_at) FROM {table}").fetchone()[0]
+            try:
+                last[table] = datetime.strptime(str(latest)[:19], "%Y-%m-%d %H:%M:%S") if latest else None
+            except ValueError:
+                last[table] = None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+    hours = [(window_start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:00:00Z") for i in range(24)]
+    return {"hours": hours, "posts": series["posts"], "comments": series["comments"]}, \
+        {"post": last["posts"], "comment": last["comments"]}
+
+
 def worker_states():
     """Name -> (status, started_at) for each managed worker, without CPU stats."""
     states = {}
@@ -346,9 +402,13 @@ def get_overview():
         if _cache["value"] and time.time() - _cache["at"] < 8:
             return _cache["value"]
 
-    now = log_now()
-    activity, last = log_activity(now)
-    errors_24h, latest_error = recent_errors(now)
+    log_clock = log_now()
+    from_db = db_activity(datetime.now(timezone.utc).replace(tzinfo=None))
+    if from_db:
+        (activity, last), now = from_db, datetime.now(timezone.utc).replace(tzinfo=None)
+    else:
+        (activity, last), now = log_activity(log_clock), log_clock
+    errors_24h, latest_error = recent_errors(log_clock)
     db = db_stats()
     states = worker_states()
 
@@ -391,7 +451,7 @@ def get_overview():
         },
         "errors24": errors_24h,
         "last_error": (
-            {"ago": humanize_ago(latest_error[0], now), "context": latest_error[1]}
+            {"ago": humanize_ago(latest_error[0], log_clock), "context": latest_error[1]}
             if latest_error else None
         ),
         "running_for": (
@@ -399,7 +459,8 @@ def get_overview():
         ),
         "workers": {"running": sum(1 for s, _ in states.values() if s == "running"), "total": len(states)},
         "activity": activity,
-        "updated": now.strftime("%H:%M"),
+        # ISO time in UTC; the page shows it in the viewer's own time zone
+        "updated": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         # Kept for anything already reading the old /dashboard/metrics format
         "mirror_status": "working" if db["running"] else ("running" if level != "bad" else "degraded"),
         "posts_queued": db["queued_posts"],
