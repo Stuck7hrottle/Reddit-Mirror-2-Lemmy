@@ -248,8 +248,15 @@ def main() -> int:
     if args.channel:
         pairs = [(c, m) for c, m in pairs if c == args.channel]
     if not pairs:
-        print("Nothing to do: set ODYSEE_MAP in .env, e.g. ODYSEE_MAP=@hoffmantactical:3=hoffman_odysee")
-        return 1
+        msg = "No channels configured: set ODYSEE_MAP in .env, e.g. ODYSEE_MAP=@hoffmantactical:3=hoffman_odysee"
+        if args.once or args.dry_run or args.channel:
+            print(msg)
+            return 1
+        # Running as a service with nothing to do: wait quietly rather than exit,
+        # which Docker's restart policy would turn into a restart loop.
+        log(msg + " — idle until the container is recreated with it set.")
+        while True:
+            time.sleep(86400)
 
     delay = float(os.getenv("ODYSEE_POST_DELAY_SECS", "10"))
     interval = int(os.getenv("ODYSEE_INTERVAL_SECS", "3600"))

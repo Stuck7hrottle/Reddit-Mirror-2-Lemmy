@@ -1,6 +1,6 @@
 # Reddit ↔ Lemmy Mirror
 
-A self-hosted bridge that **syncs posts and comments** between Reddit and Lemmy communities — automatically, bi-directionally, and with media mirroring.
+A self-hosted bridge that **syncs posts and comments** between Reddit and Lemmy communities — automatically, bi-directionally, and with media mirroring. It can also mirror **Odysee channels** into Lemmy communities.
 
 ---
 
@@ -9,6 +9,7 @@ A self-hosted bridge that **syncs posts and comments** between Reddit and Lemmy 
 This system mirrors:
 - **Reddit → Lemmy:** posts, comments, images, galleries, and videos  
 - **Lemmy → Reddit:** comments (humanized phrasing + media rehosting)  
+- **Odysee → Lemmy (optional):** each channel's uploads as link posts, one community per channel  
 - **Dashboard control:** live stats, logs, and Docker container management  
 
 Built for self-hosted instances and community moderation, the mirror runs entirely via Docker containers and SQLite databases.
@@ -23,18 +24,24 @@ Built for self-hosted instances and community moderation, the mirror runs entire
 | `reddit-refresh` | Periodically re-runs mirror cycles | Enabled |
 | `reddit_comment_sync` | Mirrors Reddit comments → Lemmy | Enabled |
 | `lemmy_comment_sync` | Mirrors Lemmy comments → Reddit | DISABLED by Default |
-| `mirror-dashboard` | FastAPI + HTMX dashboard for monitoring | Enabled |
+| `odysee-mirror` | Mirrors Odysee channel uploads → Lemmy communities | Optional (idle until `ODYSEE_MAP` is set) |
+| `mirror-dashboard` | FastAPI dashboard: status, activity, logs, worker controls | Enabled |
 | `data/` | Persistent storage for SQLite and caches | Enabled |
 
-Each container communicates through shared SQLite databases (`jobs.db`, `bridge_cache.db`) located under `/opt/Reddit-Mirror-2-Lemmy/data`.
+The containers share one SQLite database, `data/jobs.db` (under `/opt/Reddit-Mirror-2-Lemmy`):
+Reddit↔Lemmy mappings live in `posts`/`comments`, the job queue in `jobs`, and other sources
+(Odysee) in `source_posts`. The media cache is `data/media_cache.json`. Activity from every
+worker is logged to `logs/bridge.log`, errors to `logs/errors.log`.
 
 ---
 
 ### ✨ Features
 
 - ✅ Full **two-way** post & comment mirroring  
-- ✅ **Media rehosting** (images → `/pictrs`, video labeling)  
-- ✅ **Dashboard** with live metrics, charts, and Docker controls  
+- ✅ **Media rehosting** (images and Reddit videos with sound → `/pictrs`; link posts keep their link)  
+- ✅ **Odysee channel mirroring** with full-history backfill  
+- ✅ **Dashboard** with live status, 24-hour activity, logs, and Docker controls  
+- ✅ **Nightly backups**, log rotation, and a repair tool for older posts  
 - ✅ **Job queue persistence** (via SQLite)  
 - ✅ Automatic **token renewal** for Lemmy & Reddit  
 - ✅ Built-in **rate limiting and backoff** handling  
@@ -76,13 +83,19 @@ REDDIT_CLIENT_SECRET=xxxx
 REDDIT_USERNAME=redditbot
 REDDIT_PASSWORD=secret
 SUB_MAP=fosscad:fosscad,gundeals:gundeals
-ENABLE_LEMMY_COMMENT_SYNC=true - THIS IS FALSE BY DEFAULT
+ENABLE_LEMMY_COMMENT_SYNC=false      # true to also mirror Lemmy comments back to Reddit
+
+# Optional: Odysee channels → Lemmy communities (create each community first)
+# ODYSEE_MAP=@hoffmantactical:3=hoffman_odysee
 ```
+See [Mirroring Odysee Channels](#-mirroring-odysee-channels) before enabling `ODYSEE_MAP`.
 
 #### 3️⃣ Start the stack
 ```bash
 docker compose up -d
 ```
+The `odysee-mirror` container starts too; it stays idle until `ODYSEE_MAP` is set.
+Leave it out of `docker-compose.yml` if you don't want it.
 
 #### 4️⃣ Visit the Dashboard
 The dashboard only listens on the server itself (`127.0.0.1:8080`) because it can
@@ -105,7 +118,7 @@ You’ll see:
 
 ## 🔁 Refresh Cycles & Pagination
 
-- The **refresh container** runs every 15 minutes by default (`REFRESH_INTERVAL=900`).  
+- The **refresh container** checks every hour by default (`REFRESH_INTERVAL=3600`).  
 - Each cycle checks all configured subreddits and mirrors new or edited content.  
 - `POST_FETCH_LIMIT=all` enables full backfill with pagination — fetching thousands of posts safely.  
 - The bridge pauses between batches to avoid Reddit API rate limits.
@@ -121,8 +134,9 @@ Example log:
 ### 🧠 Usage Notes
 
 #### Mirror Cycles
-- Default interval: **10 minutes**
-- Controlled by `reddit-refresh` container
+- New Reddit posts: checked hourly by `reddit-refresh` (`REFRESH_INTERVAL`)
+- Reddit comments: synced every 10 minutes (`REDDIT_COMMENT_SYNC_INTERVAL`)
+- Odysee uploads: checked hourly by `odysee-mirror` (`ODYSEE_INTERVAL_SECS`)
 - Backfill and edit syncs enabled via `.env`
 
 #### Dashboard API Endpoints
@@ -136,7 +150,7 @@ Example log:
 | `/dashboard/container/{name}/{action}` | Start/stop/restart a mirror worker (POST) |
 | `/dashboard/container/{name}/build` | Rebuild and start a mirror worker (POST) |
 
-Control endpoints only accept the four mirror worker containers and require the
+Control endpoints only accept the mirror's own worker containers and require the
 `X-Requested-With: mirror-dashboard` header, which the dashboard's own buttons send.
 
 ---
@@ -298,6 +312,14 @@ edits, handy for a first look.
 | `MAX_POSTS_PER_RUN` | Limit per cycle | 5 |
 | `POST_FETCH_LIMIT` | Post fetch limit | `all` |
 | `REDDIT_BOT_USERNAME` | Prevents self-loop comments | optional |
+| `REFRESH_INTERVAL` | Seconds between Reddit checks | 3600 |
+| `MAX_IMAGE_BYTES` | Largest image/video to rehost (bytes) | 524288000 (500 MB) |
+| `MEDIA_UPLOAD_TIMEOUT_SECS` | Wait for Lemmy to store/convert media; keep above pict-rs's processing time | 600 |
+| `YT_DLP_TIMEOUT_SECS` | Max time to download one video | 600 |
+| `ODYSEE_MAP` | `@channel:id=community` pairs, comma-separated | unset (Odysee off) |
+| `ODYSEE_BACKFILL` | Mirror each new channel's whole history, oldest first | true |
+| `ODYSEE_INTERVAL_SECS` | Seconds between Odysee checks | 3600 |
+| `ODYSEE_POST_DELAY_SECS` | Pause between Odysee posts | 10 |
 
 ---
 
@@ -309,7 +331,9 @@ python3 background_worker.py
 python3 mirror_worker.py
 python3 lemmy_comment_sync.py
 python3 reddit_comment_sync.py
-python3 dashboard/main.py  # dashboard
+python3 odysee_mirror.py --dry-run          # Odysee: preview
+python3 repair_posts.py --dry-run           # repair tool: preview
+cd dashboard && uvicorn main:app --port 8080  # dashboard
 ```
 
 ---
