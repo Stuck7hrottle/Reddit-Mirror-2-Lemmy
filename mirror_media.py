@@ -279,6 +279,60 @@ def _fetch_bytes(url: str, headers: Optional[dict] = None) -> Optional[bytes]:
         log(f"⚠️ Failed to fetch media {url}: {e}")
         return None
         
+V_REDDIT_BASE = os.getenv("V_REDDIT_BASE", "https://v.redd.it").rstrip("/")
+VIDEO_USER_AGENT = os.getenv(
+    "VIDEO_USER_AGENT",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36",
+)
+
+
+def download_v_redd_it(url: str) -> Optional[str]:
+    """
+    Download a Reddit-hosted video straight from Reddit's video CDN.
+
+    Reddit now blocks yt-dlp's reddit.com lookups from servers (403 "Blocked",
+    then "Account authentication is required"), but the video files on
+    v.redd.it are still served. Every v.redd.it video has an HLS playlist
+    carrying video and sound together; ffmpeg saves it as a single MP4,
+    picking the best video and audio streams. Returns the local path or None.
+    """
+    m = re.match(r"^https?://v\.redd\.it/([A-Za-z0-9]+)", url or "", re.I)
+    if not m:
+        return None
+    video_id = m.group(1)
+    out = DATA_DIR / f"temp_hls_{video_id}_{os.getpid()}_{int(time.time() * 1000)}.mp4"
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+        "-user_agent", VIDEO_USER_AGENT,
+        "-headers", "Referer: https://www.reddit.com/\r\n",
+        "-i", f"{V_REDDIT_BASE}/{video_id}/HLSPlaylist.m3u8",
+        "-c", "copy",
+        "-bsf:a", "aac_adtstoasc",
+        "-movflags", "+faststart",
+    ]
+    if not YT_DLP_ALLOW_AUDIO:
+        cmd.append("-an")
+    cmd.append(str(out))
+
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=YT_DLP_TIMEOUT_SECS)
+        if result.returncode != 0 or not out.exists() or out.stat().st_size == 0:
+            log(f"⚠️ Direct v.redd.it download failed for {url}: {result.stderr.strip()[:200]}")
+            out.unlink(missing_ok=True)
+            return None
+        if out.stat().st_size > MAX_MEDIA_BYTES:
+            log(f"⚠️ v.redd.it video {video_id} is {out.stat().st_size // (1024 * 1024)} MB, over MAX_IMAGE_BYTES; linking instead")
+            out.unlink(missing_ok=True)
+            return None
+        return str(out)
+    except subprocess.TimeoutExpired:
+        log(f"⚠️ Direct v.redd.it download timed out after {YT_DLP_TIMEOUT_SECS}s for {url}")
+    except Exception as e:
+        log(f"⚠️ Direct v.redd.it download error for {url}: {e}")
+    out.unlink(missing_ok=True)
+    return None
+
+
 def download_video(url: str) -> Optional[str]:
     """
     Downloads a video to DATA_DIR and returns the local path.
@@ -460,13 +514,15 @@ def mirror_url(url: str) -> Optional[str]:
 
     fetch_headers = None
 
-    # 5. v.redd.it Handling (use yt-dlp like the old implementation)
+    # 5. v.redd.it Handling: Reddit's video CDN first, yt-dlp as a fallback
     if is_v_reddit:
-        log(f"DEBUG: v.redd.it detected; attempting yt-dlp download for {src_url}")
-        local_path = download_video(src_url)
+        local_path = download_v_redd_it(src_url)
+        if not local_path:
+            log(f"DEBUG: direct download failed; trying yt-dlp for {src_url}")
+            local_path = download_video(src_url)
         if not local_path:
             # If you prefer linking instead of failing hard, change return None -> return md
-            log(f"⚠️ yt-dlp failed for {src_url}; falling back to link")
+            log(f"⚠️ Couldn't download {src_url}; falling back to link")
             md = f"[Video]({src_url})"
             _cache_set_ok(src_url, md)
             return md

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 ### Fixed
+- Reddit videos failed to download: Reddit now blocks yt-dlp's reddit.com lookups from servers ("403 Blocked", then "Account authentication is required"). Videos are now saved directly from Reddit's video CDN (v.redd.it HLS playlist, video and sound) with ffmpeg; yt-dlp remains a fallback
+- repair_posts.py no longer edits a title-only post when all it could add is a link back to the Reddit video
 - repair_posts.py now starts from the post as it is on Lemmy: titles are never changed, text saved before a Reddit post was deleted or removed is kept, `[deleted]`/`[removed]` placeholders are never copied, and posts edited since the candidate list was made are left alone
 - repair_posts.py treated 3 in 4 posts as deleted from Reddit: /by_id returns only 25 posts per request. It now asks for 25 at a time and re-checks any post a batch leaves out
 - Log rotation uses numbered files (bridge.log.1, .2…) so rotating twice in one day can't fail
