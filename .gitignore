@@ -25,3 +25,23 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Carried over from the server's previous .gitignore
+*.py[cod]
+*.so
+*.egg-info/
+dist/
+build/
+*_token.json
+community_map.json
+post_map.json
+*.tmp
+*.bak
+*.pid
+*.tar
+*.img
+*.swp
+.vscode/
+.idea/
+.DS_Store
+docker-restart.sh
