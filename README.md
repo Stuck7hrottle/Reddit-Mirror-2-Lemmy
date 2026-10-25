@@ -207,7 +207,7 @@ docker compose start reddit-mirror reddit-refresh reddit_comment_sync lemmy_comm
 
 Older versions dropped the link from link posts (news articles etc.), and long
 Reddit videos fell back to a link. `repair_posts.py` fixes just those posts:
-it checks each against the original on Reddit (100 per request) and edits the
+it checks each against the original on Reddit (25 per request) and edits the
 Lemmy post **only** when there's something to add. Genuine title-only posts,
 and videos that still don't fit, are left alone.
 

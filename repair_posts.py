@@ -9,7 +9,7 @@ Two kinds of post need it:
               link, usually because it was longer than Lemmy then allowed.
 
 The candidate list comes from Lemmy's own database (see README, "Repairing old
-posts"). For each candidate this script looks up the original Reddit post (100
+posts"). For each candidate this script looks up the original Reddit post (25
 per request), works out what the post should contain now, and edits the Lemmy
 post ONLY when that adds something. Genuine title-only posts are left alone.
 
@@ -43,6 +43,9 @@ DATA = Path(os.getenv("REPAIR_DATA_DIR", "data"))
 DEFAULT_INPUT = DATA / "repair_candidates.csv"
 PROGRESS = DATA / "repair_progress.json"
 USER_AGENT = os.getenv("REDDIT_USER_AGENT", "RedditToLemmyBridge/1.1 (repair)")
+# Reddit's /by_id returns only the first 25 posts of a request unless told
+# otherwise, so ask for 25 at a time (and send limit=100 as well, to be safe).
+BATCH = 25
 
 
 def log(msg: str) -> None:
@@ -112,7 +115,7 @@ def fetch_reddit_batch(ids: list[str], headers: dict) -> dict[str, dict]:
     host = "https://oauth.reddit.com" if "Authorization" in headers else "https://www.reddit.com"
     url = f"{host}/by_id/{','.join('t3_' + i for i in ids)}.json"
     for attempt in range(5):
-        r = requests.get(url, headers=headers, params={"raw_json": 1}, timeout=30)
+        r = requests.get(url, headers=headers, params={"raw_json": 1, "limit": 100}, timeout=30)
         if r.status_code == 429:
             wait = int(float(r.headers.get("Retry-After", 10 * (attempt + 1))))
             log(f"Reddit asked us to slow down; waiting {wait}s")
@@ -218,10 +221,15 @@ def main() -> int:
     headers = reddit_headers()
     edits = 0
 
-    for start in range(0, len(todo), 100):
-        chunk = todo[start:start + 100]
+    for start in range(0, len(todo), BATCH):
+        chunk = todo[start:start + BATCH]
         reddit_ids = [mapping[lid] for lid, _ in chunk if lid in mapping]
         subs = fetch_reddit_batch(reddit_ids, headers) if reddit_ids else {}
+        # Don't call a post deleted just because a batch left it out: ask again alone
+        for rid in reddit_ids:
+            if rid not in subs:
+                subs.update(fetch_reddit_batch([rid], headers))
+                time.sleep(1)
 
         for lid, kind in chunk:
             rid = mapping.get(lid)
@@ -253,7 +261,8 @@ def main() -> int:
                             edits += 1
                             time.sleep(args.delay)
 
-            tally("would change" if outcome.startswith("would") else outcome.split(":")[0])
+            tally("would change" if outcome.startswith("would") else
+                  outcome if outcome.startswith("skipped") else outcome.split(":")[0])
             line = f"post {lid} (reddit {rid or '?'}): {outcome}"
             if args.dry_run:
                 if outcome.startswith("would"):

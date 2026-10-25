@@ -1,11 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- repair_posts.py treated 3 in 4 posts as deleted from Reddit: /by_id returns only 25 posts per request. It now asks for 25 at a time and re-checks any post a batch leaves out
+- Log rotation uses numbered files (bridge.log.1, .2…) so rotating twice in one day can't fail
+
 ### Added
 - `contrib/backup.sh`: nightly consistent backup of jobs.db, media cache and .env, kept 14 days
 - `contrib/logrotate.conf` and `contrib/cron.d-reddit-mirror` to install log rotation and the backup schedule
 - README section on installing backups and restoring one
-- `repair_posts.py`: fixes old posts that lost their link or whose video fell back to a link, editing only posts that gain something. Dry-run mode, resumable, fetches Reddit 100 posts per request
+- `repair_posts.py`: fixes old posts that lost their link or whose video fell back to a link, editing only posts that gain something. Dry-run mode, resumable, fetches Reddit 25 posts per request
 
 ### Fixed
 - Link posts (news articles and other web pages) arrived on Lemmy with only a title: the link was dropped. The link is now the post's URL, so Lemmy shows its preview
