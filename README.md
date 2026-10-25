@@ -209,7 +209,10 @@ Older versions dropped the link from link posts (news articles etc.), and long
 Reddit videos fell back to a link. `repair_posts.py` fixes just those posts:
 it checks each against the original on Reddit (25 per request) and edits the
 Lemmy post **only** when there's something to add. Genuine title-only posts,
-and videos that still don't fit, are left alone.
+and videos that still don't fit, are left alone. It never deletes a post or changes
+a title, and it edits each post as it is on Lemmy right now: text your mirror
+saved is kept even if the Reddit original was later deleted or removed, and
+Reddit's `[deleted]`/`[removed]` placeholders are never copied.
 
 **1. List the candidates** from Lemmy's database (read-only). Replace
 `lemmy-postgres-1` with your Postgres container and `mirrorbot` with your bot's username:

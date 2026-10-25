@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ### Fixed
+- repair_posts.py now starts from the post as it is on Lemmy: titles are never changed, text saved before a Reddit post was deleted or removed is kept, `[deleted]`/`[removed]` placeholders are never copied, and posts edited since the candidate list was made are left alone
 - repair_posts.py treated 3 in 4 posts as deleted from Reddit: /by_id returns only 25 posts per request. It now asks for 25 at a time and re-checks any post a batch leaves out
 - Log rotation uses numbered files (bridge.log.1, .2…) so rotating twice in one day can't fail
 
