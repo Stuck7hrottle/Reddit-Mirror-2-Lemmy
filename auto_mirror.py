@@ -87,6 +87,25 @@ def log(msg: str):
     # Console-friendly timestamp + flush
     from datetime import timezone
     print(f"{datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
+    _append_bridge_log(msg)
+
+
+def _append_bridge_log(msg: str) -> None:
+    """
+    Also write to logs/bridge.log in the same format as utils.log(), so post
+    and media activity shows on the dashboard's Logs page next to comments.
+    Never lets a logging problem interrupt mirroring.
+    """
+    try:
+        try:
+            from utils import LOG_FILE as bridge_log  # same file the comment workers use
+        except Exception:
+            bridge_log = Path("logs") / "bridge.log"
+        line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {msg}\n"
+        with open(bridge_log, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # LEGACY POST MAP (for one-time migration)
@@ -264,6 +283,31 @@ def _append_mirrored_media_line(media_lines: list[str], mirrored: str, label: st
     else:
         media_lines.append(f"![{label}]({mirrored})")
 
+REDDIT_HOSTS = ("reddit.com", "redd.it", "redditmedia.com", "redditstatic.com", "reddituploads.com")
+
+
+def _external_link(sub, url: str) -> str | None:
+    """
+    The submission's link if it points somewhere other than Reddit, else None.
+    Reddit's own links (self posts, i.redd.it, v.redd.it, galleries, crossposts)
+    are never used, so mirrored posts don't send readers back to Reddit.
+    """
+    from urllib.parse import urlparse
+    if bool(_get(sub, "is_self", False)) or not url:
+        return None
+    url = url.replace("&amp;", "&").strip()
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return None
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme not in ("http", "https") or not host:
+        return None
+    if any(host == h or host.endswith("." + h) for h in REDDIT_HOSTS):
+        return None
+    return url
+
+
 def build_media_block_from_submission(sub) -> tuple[str, str | None]:
     """
     Constructs a Lemmy post body by mirroring all Reddit media locally.
@@ -317,6 +361,7 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
         if url:
             # Mirror the URL (mirror_url now handles video downloading/hosting)
             mirrored_url = mirror_url(url)
+            external = _external_link(sub, url)
             if mirrored_url:
                 # If mirror_url returns markdown (e.g. "[Video](...)"), keep it in the body.
                 is_markdown = mirrored_url.lstrip().startswith("[")
@@ -327,8 +372,17 @@ def build_media_block_from_submission(sub) -> tuple[str, str | None]:
                     primary_url = mirrored_url
                     # Optional: also show it in the body; I'd recommend NOT duplicating:
                     # _append_mirrored_media_line(media_lines, mirrored_url, label="Media")
+                elif is_markdown and external:
+                    # YouTube, Rumble, etc.: as the post's link, Lemmy shows a
+                    # thumbnail and (for YouTube) an inline player
+                    primary_url = external
                 else:
                     _append_mirrored_media_line(media_lines, mirrored_url, label="Media")
+            elif external:
+                # An ordinary web page (news article, store listing...). There's
+                # nothing to rehost, so keep the link itself; Lemmy fetches its
+                # title and thumbnail. Without this the post had only a title.
+                primary_url = external
 
     # Combine text and mirrored media
     if media_lines:
@@ -549,6 +603,16 @@ def create_lemmy_post(subreddit_name, post, jwt, community_id):
                 log(f"⏳ Lemmy rate-limited post — sleeping {wait}s (attempt {attempts})...")
                 time.sleep(wait)
                 backoff = int(backoff * 1.7) + 5
+                continue
+
+            # Lemmy refused the link itself (blocked domain, too long, invalid):
+            # post anyway with the link in the body rather than losing the post
+            if r.status_code == 400 and payload.get("url") and "/pictrs/" not in payload["url"] and any(
+                k in text for k in ("url", "blocked")
+            ):
+                link = payload.pop("url")
+                log(f"⚠️ Lemmy rejected link {link[:120]} ({text[:80]}); putting it in the body instead")
+                payload["body"] = (f"🔗 <{link}>\n\n" + (payload.get("body") or "")).strip()
                 continue
 
             if not r.ok:

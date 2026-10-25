@@ -141,6 +141,36 @@ Control endpoints only accept the four mirror worker containers and require the
 
 ---
 
+### 🎬 Media and Links
+
+| Reddit post links to | What the Lemmy post gets |
+|---|---|
+| An image or gallery (i.redd.it, imgur, direct .jpg/.png/.gif) | Rehosted on your Lemmy and embedded |
+| A Reddit video (v.redd.it) or a direct .mp4/.webm | Downloaded with sound, rehosted and embedded. Falls back to a link if your Lemmy rejects it (too long or too large) or the download fails |
+| YouTube, Rumble, Odysee, Vimeo, Streamable, Twitch, Kick | Not downloaded. Used as the post's link, so Lemmy shows a thumbnail (and a player for YouTube) |
+| Any other web page (news articles, stores...) | Used as the post's link; Lemmy fetches its title and thumbnail |
+| Reddit itself (self posts, crossposts) | No link back to Reddit |
+
+#### Allowing longer videos
+
+Videos are stored by **pict-rs**, Lemmy's media server, which by default rejects
+anything over **900 frames** (about 30 seconds at 30 fps) or **40 MB**, and stops
+processing after **30 seconds**. Raise these in the `pictrs` service's
+`environment:` in your **Lemmy** `docker-compose.yml`, then recreate pict-rs:
+
+```yaml
+      PICTRS__MEDIA__MAX_FILE_SIZE: "300"             # MB, all uploads
+      PICTRS__MEDIA__VIDEO__MAX_FILE_SIZE: "300"      # MB, videos
+      PICTRS__MEDIA__VIDEO__MAX_FRAME_COUNT: "36000"  # 20 min at 30 fps
+      PICTRS__MEDIA__VIDEO__ALLOW_AUDIO: "true"       # keep sound
+      PICTRS__MEDIA__PROCESS_TIMEOUT: "900"           # seconds to transcode
+```
+
+Every web server between the bridge and pict-rs must also accept the file size
+(`client_max_body_size` in nginx). On the bridge side, keep
+`MEDIA_UPLOAD_TIMEOUT_SECS` (default 600) longer than pict-rs takes to transcode,
+or the bridge will give up and upload the same video again.
+
 ### ⚙️ Configuration Reference
 
 | Variable | Description | Default |
