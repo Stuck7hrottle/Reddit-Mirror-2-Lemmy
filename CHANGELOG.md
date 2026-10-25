@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 ### Fixed
+- repair_posts.py stopped silently partway through a long run: any Reddit error (or the access token expiring) ended it. It now renews the token before it expires and on 401, waits out 429/5xx/connection errors, treats a single post's 403/404 as gone, pauses 5 then 15 minutes if Reddit is down before stopping cleanly, and carries on past an unexpected error on one post (reported, and retried on the next run). Any fatal error is written to bridge.log. `touch data/repair.stop` stops a background run cleanly
 - Direct v.redd.it downloads failed on ffmpeg 7.1+: Reddit's audio segments are named .aac but contain MPEG-TS, which newer ffmpeg rejects ("mismatches allowed extensions"). ffmpeg is now told to accept them (`-extension_picky 0`, retried without on older ffmpeg)
 - Reddit videos failed to download: Reddit now blocks yt-dlp's reddit.com lookups from servers ("403 Blocked", then "Account authentication is required"). Videos are now saved directly from Reddit's video CDN (v.redd.it HLS playlist, video and sound) with ffmpeg; yt-dlp remains a fallback
 - repair_posts.py no longer edits a title-only post when all it could add is a link back to the Reddit video

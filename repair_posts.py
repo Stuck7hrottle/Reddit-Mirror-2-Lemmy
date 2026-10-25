@@ -23,6 +23,8 @@ from Lemmy just before editing and only added to: a missing link, a hosted
 video in place of its fallback link, or text that was never mirrored.
 Reddit's "[deleted]"/"[removed]" placeholders are never copied.
 
+To stop a background run: touch data/repair.stop (it stops before the next batch).
+
 Progress is saved to data/repair_progress.json, so it can be stopped and
 re-run: finished posts are skipped. Each change is written to logs/bridge.log
 and shows on the dashboard's Logs page.
@@ -38,6 +40,7 @@ import re
 import sqlite3
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import requests
@@ -48,6 +51,7 @@ import mirror_media as mm
 DATA = Path(os.getenv("REPAIR_DATA_DIR", "data"))
 DEFAULT_INPUT = DATA / "repair_candidates.csv"
 PROGRESS = DATA / "repair_progress.json"
+STOP_FILE = DATA / "repair.stop"  # create this file to stop a background run cleanly
 USER_AGENT = os.getenv("REDDIT_USER_AGENT", "RedditToLemmyBridge/1.1 (repair)")
 # Reddit's /by_id returns only the first 25 posts of a request unless told
 # otherwise, so ask for 25 at a time (and send limit=100 as well, to be safe).
@@ -100,37 +104,87 @@ def save_progress(progress: dict) -> None:
 
 
 # ─────────────────────────────────────────────
-# Reddit: 100 posts per request
+# Reddit: 25 posts per request
 # ─────────────────────────────────────────────
-def reddit_headers() -> dict:
-    headers = {"User-Agent": USER_AGENT}
-    cid, secret = os.getenv("REDDIT_CLIENT_ID"), os.getenv("REDDIT_CLIENT_SECRET")
-    if cid and secret:
-        r = requests.post(
-            "https://www.reddit.com/api/v1/access_token",
-            auth=requests.auth.HTTPBasicAuth(cid, secret),
-            data={"grant_type": "client_credentials"},
-            headers=headers, timeout=15,
-        )
-        if r.ok and r.json().get("access_token"):
-            headers["Authorization"] = f"bearer {r.json()['access_token']}"
-    return headers
+class RedditUnavailable(Exception):
+    """Reddit kept failing; the run should pause or stop, not lose its place."""
 
 
-def fetch_reddit_batch(ids: list[str], headers: dict) -> dict[str, dict]:
-    host = "https://oauth.reddit.com" if "Authorization" in headers else "https://www.reddit.com"
-    url = f"{host}/by_id/{','.join('t3_' + i for i in ids)}.json"
-    for attempt in range(5):
-        r = requests.get(url, headers=headers, params={"raw_json": 1, "limit": 100}, timeout=30)
+class RedditClient:
+    """
+    App-only Reddit access. The access token expires (Reddit says when), so it's
+    renewed a few minutes early, and again whenever Reddit answers 401.
+    """
+
+    def __init__(self):
+        self.token = None
+        self.expires = 0.0
+
+    def _renew(self) -> None:
+        cid, secret = os.getenv("REDDIT_CLIENT_ID"), os.getenv("REDDIT_CLIENT_SECRET")
+        self.token, self.expires = None, time.time() + 600
+        if not (cid and secret):
+            return
+        try:
+            r = requests.post(
+                "https://www.reddit.com/api/v1/access_token",
+                auth=requests.auth.HTTPBasicAuth(cid, secret),
+                data={"grant_type": "client_credentials"},
+                headers={"User-Agent": USER_AGENT}, timeout=15,
+            )
+            data = r.json() if r.ok else {}
+            if data.get("access_token"):
+                self.token = data["access_token"]
+                self.expires = time.time() + max(300, int(data.get("expires_in", 3600)) - 300)
+        except (requests.RequestException, ValueError):
+            pass
+
+    def headers(self, force: bool = False) -> dict:
+        if force or time.time() >= self.expires:
+            self._renew()
+        h = {"User-Agent": USER_AGENT}
+        if self.token:
+            h["Authorization"] = f"bearer {self.token}"
+        return h
+
+
+def fetch_reddit_batch(ids: list[str], client: RedditClient) -> dict[str, dict]:
+    """
+    Up to 25 Reddit posts by id. Waits out rate limits and temporary errors,
+    renews the access token when it expires, and treats 'not found/forbidden'
+    as 'not returned'. Raises RedditUnavailable only if Reddit keeps failing.
+    """
+    last = ""
+    for attempt in range(8):
+        headers = client.headers(force=attempt > 0 and last == "401")
+        host = "https://oauth.reddit.com" if "Authorization" in headers else "https://www.reddit.com"
+        url = f"{host}/by_id/{','.join('t3_' + i for i in ids)}.json"
+        try:
+            r = requests.get(url, headers=headers, params={"raw_json": 1, "limit": 100}, timeout=30)
+        except requests.RequestException as e:
+            last = f"connection error: {e}"
+            time.sleep(min(120, 10 * (attempt + 1)))
+            continue
+        if r.ok:
+            try:
+                children = r.json().get("data", {}).get("children", [])
+            except ValueError:
+                last = "unreadable response"
+                time.sleep(10)
+                continue
+            return {c["data"]["id"]: c["data"] for c in children if c.get("data", {}).get("id")}
+        last = str(r.status_code)
+        if r.status_code == 401:
+            continue  # token expired: renewed on the next attempt
         if r.status_code == 429:
-            wait = int(float(r.headers.get("Retry-After", 10 * (attempt + 1))))
+            wait = int(float(r.headers.get("Retry-After") or 10 * (attempt + 1)))
             log(f"Reddit asked us to slow down; waiting {wait}s")
             time.sleep(wait)
             continue
-        r.raise_for_status()
-        children = r.json().get("data", {}).get("children", [])
-        return {c["data"]["id"]: c["data"] for c in children if c.get("data", {}).get("id")}
-    raise RuntimeError("Reddit kept rate-limiting the batch request")
+        if r.status_code in (403, 404) and len(ids) == 1:
+            return {}  # that one post is private, banned or gone
+        time.sleep(min(120, 10 * (attempt + 1)))  # 5xx and other hiccups
+    raise RedditUnavailable(f"Reddit kept failing ({last})")
 
 
 # ─────────────────────────────────────────────
@@ -318,18 +372,36 @@ def main() -> int:
         counts[key] = counts.get(key, 0) + 1
 
     jwt = None if args.dry_run else (am.get_cached_jwt() or am.lemmy_login(force=True))
-    headers = reddit_headers()
+    client = RedditClient()
     edits = 0
+    errors = 0
 
     for start in range(0, len(todo), BATCH):
+        if STOP_FILE.exists():
+            STOP_FILE.unlink(missing_ok=True)
+            say(f"Stop requested. Summary so far: {counts}. Run again to continue.")
+            return 0
+
         chunk = todo[start:start + BATCH]
         reddit_ids = [mapping[lid] for lid, _ in chunk if lid in mapping]
-        subs = fetch_reddit_batch(reddit_ids, headers) if reddit_ids else {}
-        # Don't call a post deleted just because a batch left it out: ask again alone
-        for rid in reddit_ids:
-            if rid not in subs:
-                subs.update(fetch_reddit_batch([rid], headers))
-                time.sleep(1)
+        subs = None
+        for pause in (0, 300, 900):  # if Reddit is down, wait 5 then 15 minutes before giving up
+            if pause:
+                say(f"Reddit isn't answering; pausing {pause // 60} minutes before trying again")
+                time.sleep(pause)
+            try:
+                subs = fetch_reddit_batch(reddit_ids, client) if reddit_ids else {}
+                # Don't call a post deleted just because a batch left it out: ask again alone
+                for rid in reddit_ids:
+                    if rid not in subs:
+                        subs.update(fetch_reddit_batch([rid], client))
+                        time.sleep(1)
+                break
+            except RedditUnavailable as e:
+                last_error = e
+        if subs is None:
+            say(f"Stopping: {last_error}. Nothing is lost; run again later to continue. Summary so far: {counts}")
+            return 1
 
         for lid, kind in chunk:
             rid = mapping.get(lid)
@@ -345,7 +417,13 @@ def main() -> int:
                 elif args.dry_run:
                     outcome = f"would {action}"
                 else:
-                    outcome = repair_one(int(lid), kind, without_placeholders(sub), action, jwt)
+                    try:
+                        outcome = repair_one(int(lid), kind, without_placeholders(sub), action, jwt)
+                    except Exception as e:
+                        # One bad post mustn't end the run. Not saved as done, so a re-run tries it again.
+                        errors += 1
+                        outcome = f"error: {type(e).__name__}: {e}"
+                        traceback.print_exc()
                     if outcome.startswith("fixed"):
                         edits += 1
                         time.sleep(args.delay)
@@ -358,7 +436,7 @@ def main() -> int:
                     print(line, flush=True)  # console only: a dry run shouldn't fill bridge.log
             elif not outcome.startswith("left alone"):
                 log(line)
-            if not args.dry_run:
+            if not args.dry_run and not outcome.startswith("error"):
                 progress[lid] = outcome
                 save_progress(progress)
             if args.limit and edits >= args.limit:
@@ -366,9 +444,15 @@ def main() -> int:
                 log(f"Summary: {counts}")
                 return 0
 
-    say(f"Done. Summary: {counts}")
+    say(f"Done. Summary: {counts}" + (f" ({errors} errors; run again to retry them)" if errors else ""))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as e:
+        # Anything unexpected still leaves a trace in bridge.log instead of vanishing
+        log(f"❌ Stopped by an unexpected error: {type(e).__name__}: {e}. Run again to continue.")
+        traceback.print_exc()
+        sys.exit(1)
