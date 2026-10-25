@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 ### Changed
+- README brought up to date: Odysee in the overview, architecture, features, `.env` setup and configuration table; correct refresh interval (hourly); database/log layout; today's media settings; dashboard and tool run commands
+- odysee_mirror.py idles instead of exiting when `ODYSEE_MAP` isn't set, so the example compose service can't restart-loop
+
+### Changed
 - Dashboard shows the Odysee mirror as a worker (with restart/stop/rebuild) when its container exists, and leaves it out otherwise. Odysee posts count in the activity strip, totals ("including N from Odysee") and last-post time; its "Posted" lines are filed under Mirrored on the Logs page
 
 ### Added
