@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- Dashboard showed 0 posts mirrored per hour: the post worker only prints to its console, never to bridge.log. Hourly activity and "last post/comment" now come from the database's created_at timestamps
+- Hour labels and "Updated at" now show in the viewer's own time zone instead of the server's UTC
+
 ### Dashboard redesign
 - New look: drafting-paper theme with automatic dark mode, readable on phones
 - Overview leads with a plain status ("Mirroring normally", "Quiet for 3 hours", "1 worker stopped")

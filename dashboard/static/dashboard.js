@@ -52,7 +52,14 @@
     const maxComments = Math.max(1, peakComments);
     strip.textContent = "";
 
-    activity.hours.forEach((hour, i) => {
+    // Hours arrive as ISO times; show them on the viewer's own clock
+    const hourLabel = (iso) => {
+      const d = new Date(iso);
+      return isNaN(d) ? String(iso).slice(11, 13) : String(d.getHours()).padStart(2, "0");
+    };
+
+    activity.hours.forEach((iso, i) => {
+      const hour = hourLabel(iso);
       const p = activity.posts[i];
       const c = activity.comments[i];
       const isNow = i === activity.hours.length - 1;
@@ -82,6 +89,11 @@
     // Each side has its own scale: comments usually outnumber posts many times over
     $("#scale-posts").textContent = `Busiest hour: ${fmt(peakPosts)} ${peakPosts === 1 ? "post" : "posts"}`;
     $("#scale-comments").textContent = `Busiest hour: ${fmt(peakComments)} ${peakComments === 1 ? "comment" : "comments"}`;
+  }
+
+  function localTime(iso) {
+    const d = new Date(iso);
+    return isNaN(d) ? iso : d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   }
 
   function setText(id, value) {
@@ -117,7 +129,7 @@
     setText("workers-up", `${o.workers.running} of ${o.workers.total} workers running`);
     $("#field-running").classList.toggle("alert-bad", o.workers.running < o.workers.total);
 
-    setText("updated", o.updated);
+    setText("updated", localTime(o.updated));
     renderStrip(o.activity);
   }
 
@@ -197,7 +209,11 @@
 
   function initOverview() {
     const seed = $("#overview-data");
-    if (seed) renderStrip(JSON.parse(seed.textContent).activity);
+    if (seed) {
+      const o = JSON.parse(seed.textContent);
+      renderStrip(o.activity);
+      setText("updated", localTime(o.updated));
+    }
     refreshWorkers();
     setInterval(refreshOverview, REFRESH_MS);
     setInterval(refreshWorkers, REFRESH_MS);
