@@ -171,6 +171,38 @@ Every web server between the bridge and pict-rs must also accept the file size
 `MEDIA_UPLOAD_TIMEOUT_SECS` (default 600) longer than pict-rs takes to transcode,
 or the bridge will give up and upload the same video again.
 
+### 💾 Backups and Logs
+
+`data/jobs.db` is the one file that can't be rebuilt: it records which Reddit
+post or comment became which Lemmy one. Lose it and the mirror re-posts
+everything as duplicates.
+
+**Install nightly backups and log rotation** (run once, from the project folder):
+
+```bash
+sudo cp contrib/cron.d-reddit-mirror /etc/cron.d/reddit-mirror
+sudo cp contrib/logrotate.conf /etc/logrotate.d/reddit-mirror
+sudo contrib/backup.sh          # make the first backup now
+```
+
+- Backups go to `backups/mirror-YYYY-MM-DD.tar.gz` (database, media cache and
+  `.env`), readable by root only, kept for 14 days (`KEEP_DAYS`).
+- `logs/bridge.log` rotates daily (or at 100 MB) and keeps 14 days;
+  `logs/errors.log` rotates weekly.
+- If the project isn't in `/opt/Reddit-Mirror-2-Lemmy`, edit the paths in both files.
+- Backups live on the same disk as the mirror. They protect against corruption
+  and mistakes, not a lost server, so copy them somewhere else now and then.
+
+**Restore a backup:**
+
+```bash
+docker compose stop reddit-mirror reddit-refresh reddit_comment_sync lemmy_comment_sync
+mkdir -p /tmp/restore && tar -xzf backups/mirror-YYYY-MM-DD.tar.gz -C /tmp/restore
+mv data/jobs.db data/jobs.db.before-restore
+cp /tmp/restore/jobs.db data/jobs.db
+docker compose start reddit-mirror reddit-refresh reddit_comment_sync lemmy_comment_sync
+```
+
 ### ⚙️ Configuration Reference
 
 | Variable | Description | Default |
