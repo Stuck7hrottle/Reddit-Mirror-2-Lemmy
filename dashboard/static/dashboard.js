@@ -109,6 +109,7 @@
     document.title = `${o.headline} | Mirror dashboard`;
 
     setText("total-posts", fmt(o.totals.posts));
+    setText("total-posts-note", o.totals.other_posts ? `All time, including ${fmt(o.totals.other_posts)} from Odysee` : "All time");
     setText("total-comments", fmt(o.totals.comments));
     setText("day-posts", fmt(o.last24.posts));
     setText("day-comments", fmt(o.last24.comments));
@@ -230,7 +231,7 @@
   function kindOf(msg) {
     if (/^(❌|🚫)|\bERROR\b|Traceback|Exception/.test(msg)) return "bad";
     if (/^⚠️|\b[Ff]ailed\b|\bretrying\b/.test(msg)) return "warn";
-    if (msg.startsWith("✅ Posted")) return "post";
+    if (msg.startsWith("✅ Posted") || msg.startsWith("📺 Odysee: ✅ Posted")) return "post";
     if (msg.startsWith("💬 Mirrored")) return "comment";
     return "";
   }

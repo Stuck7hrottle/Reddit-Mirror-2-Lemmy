@@ -26,7 +26,7 @@
   <div class="field">
     <dt>Posts mirrored</dt>
     <dd><span class="figure" id="total-posts">{{ o.totals.posts | thousands }}</span>
-      <span class="note">All time</span></dd>
+      <span class="note" id="total-posts-note">All time{% if o.totals.other_posts %}, including {{ o.totals.other_posts | thousands }} from Odysee{% endif %}</span></dd>
   </div>
   <div class="field">
     <dt>Comments mirrored</dt>
@@ -64,7 +64,7 @@
 
 <div class="section-head">
   <h2>Workers</h2>
-  <p>Only these four can be controlled from here.</p>
+  <p>Only these workers can be controlled from here.</p>
 </div>
 <div id="workers" class="workers">
   <p class="loading">Checking the workers…</p>
