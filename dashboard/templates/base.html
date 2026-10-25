@@ -2,164 +2,40 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Reddit → Lemmy Mirror Dashboard</title>
-
-  <!-- Tailwind CSS -->
-  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@3.3.3/dist/tailwind.min.css" rel="stylesheet">
-
-  <!-- Custom Styles -->
-  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
-  <link rel="stylesheet" href="{{ url_for('static', path='animations.css') }}">
-
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}Mirror dashboard{% endblock %}</title>
+  <link rel="preload" href="{{ url_for('static', path='fonts/osifont.woff') }}" as="font" type="font/woff" crossorigin>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}?v={{ static_version }}">
 </head>
+<body data-page="{{ page }}">
+  <div class="sheet">
+    <header class="masthead">
+      <h1>Reddit <span class="arrow">→</span> Lemmy mirror</h1>
+      <nav class="tabs" aria-label="Dashboard pages">
+        <a href="/dashboard/" {% if page == 'overview' %}aria-current="page"{% endif %}>Overview</a>
+        <a href="/dashboard/logs" {% if page == 'logs' %}aria-current="page"{% endif %}>Logs</a>
+      </nav>
+    </header>
 
-<body class="bg-gray-900 text-gray-100 font-sans overflow-x-hidden">
+    <main>
+      {% block content %}{% endblock %}
+    </main>
+  </div>
 
-  <!-- 🔹 Confirmation Modal -->
-  <div id="confirm-modal"
-       class="hidden fixed inset-0 bg-black bg-opacity-60 backdrop-blur-sm flex items-center justify-center z-[9999] transition-all duration-200">
-    <div id="confirm-box"
-         class="bg-gray-800 p-6 rounded-lg shadow-2xl w-80 max-w-sm mx-auto text-center border border-gray-700 transform scale-95 opacity-0 transition-all duration-200">
-      <h3 class="text-xl font-semibold mb-4 text-gray-100">Confirm Action</h3>
-      <p id="confirm-message" class="text-gray-300 mb-6 leading-snug"></p>
-      <div class="flex justify-center gap-4">
-        <button id="confirm-yes"
-                class="bg-blue-600 hover:bg-blue-500 text-white px-4 py-2 rounded shadow transition focus:outline-none focus:ring-2 focus:ring-blue-400">
-          Yes
-        </button>
-        <button id="confirm-no"
-                class="bg-gray-600 hover:bg-gray-500 text-white px-4 py-2 rounded shadow transition focus:outline-none focus:ring-2 focus:ring-gray-400">
-          Cancel
-        </button>
+  <dialog id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+      <div class="buttons">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn primary" id="confirm-ok" value="ok"></button>
       </div>
-    </div>
-  </div>
+    </form>
+  </dialog>
 
-  <!-- 🔹 Toast Notification -->
-  <div id="toast"
-       class="hidden fixed bottom-5 right-5 bg-gray-800 text-gray-100 px-4 py-3 rounded-lg shadow-lg border border-gray-700 transition-opacity duration-300 z-[9998]">
-  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
-  <!-- 🔹 Loading Overlay -->
-  <div id="loading-overlay"
-       class="hidden fixed inset-0 bg-black bg-opacity-60 flex flex-col items-center justify-center z-[9998] backdrop-blur-sm">
-    <div class="animate-spin rounded-full h-16 w-16 border-4 border-blue-400 border-t-transparent mb-4"></div>
-    <p id="loading-text" class="text-gray-100 text-lg font-medium">Processing...</p>
-  </div>
-
-  <!-- 🔹 Main Dashboard Container -->
-  <div class="container mx-auto p-6 relative z-10">
-    <h1 class="text-3xl font-bold mb-4 flex items-center gap-2">
-      🪞 Reddit → Lemmy Mirror Dashboard
-    </h1>
-
-    <nav class="mb-6 space-x-4">
-      <a href="/dashboard/" class="text-blue-400 hover:text-blue-200 font-medium">Status</a>
-      <a href="/dashboard/logs" class="text-blue-400 hover:text-blue-200 font-medium">Logs</a>
-    </nav>
-
-    {% block content %}{% endblock %}
-  </div>
-
-  <!-- 🔹 Confirm Modal Logic -->
-  <script>
-    let pendingAction = null;
-
-    function openConfirmModal(message, onConfirm) {
-      const modal = document.getElementById('confirm-modal');
-      const box = document.getElementById('confirm-box');
-      document.getElementById('confirm-message').textContent = message;
-
-      modal.classList.remove('hidden');
-      document.body.classList.add('overflow-hidden');
-
-      // Centered fade + scale in
-      requestAnimationFrame(() => {
-        box.classList.remove('scale-95', 'opacity-0');
-        box.classList.add('scale-100', 'opacity-100');
-      });
-
-      pendingAction = onConfirm;
-    }
-
-    function closeModal() {
-      const modal = document.getElementById('confirm-modal');
-      const box = document.getElementById('confirm-box');
-
-      box.classList.remove('scale-100', 'opacity-100');
-      box.classList.add('scale-95', 'opacity-0');
-
-      setTimeout(() => {
-        modal.classList.add('hidden');
-        document.body.classList.remove('overflow-hidden');
-        pendingAction = null;
-      }, 150);
-    }
-
-    document.getElementById('confirm-no').addEventListener('click', closeModal);
-    document.getElementById('confirm-yes').addEventListener('click', () => {
-      if (pendingAction) pendingAction();
-      closeModal();
-    });
-
-    window.addEventListener('DOMContentLoaded', () => {
-      document.getElementById('confirm-modal').classList.add('hidden');
-    });
-  </script>
-
-  <!-- 🔹 Toast Logic -->
-  <script>
-    function showToast(message, isError = false) {
-      const toast = document.getElementById('toast');
-      toast.textContent = message;
-      toast.classList.remove('hidden', 'border-green-500', 'border-red-500');
-      toast.classList.add(isError ? 'border-red-500' : 'border-green-500');
-      toast.style.opacity = '1';
-      setTimeout(() => {
-        toast.style.opacity = '0';
-        setTimeout(() => toast.classList.add('hidden'), 300);
-      }, 3500);
-    }
-  </script>
-
-  <!-- 🔹 Loading Overlay Logic -->
-  <script>
-    function showLoading(message = "Processing...", type = "info") {
-      const overlay = document.getElementById('loading-overlay');
-      const text = document.getElementById('loading-text');
-      const spinner = overlay.querySelector('div');
-      text.textContent = message;
-
-      spinner.classList.remove(
-        'border-blue-400', 'border-yellow-400', 'border-red-400', 'border-green-400',
-        'spinner-glow-blue', 'spinner-glow-yellow', 'spinner-glow-red', 'spinner-glow-green'
-      );
-
-      text.classList.remove('text-blue-100', 'text-yellow-100', 'text-red-100', 'text-green-100');
-
-      if (type === "build") {
-        spinner.classList.add('border-blue-400', 'spinner-glow-blue');
-        text.classList.add('text-blue-100');
-      } else if (type === "restart") {
-        spinner.classList.add('border-yellow-400', 'spinner-glow-yellow');
-        text.classList.add('text-yellow-100');
-      } else if (type === "stop") {
-        spinner.classList.add('border-red-400', 'spinner-glow-red');
-        text.classList.add('text-red-100');
-      } else {
-        spinner.classList.add('border-green-400', 'spinner-glow-green');
-        text.classList.add('text-green-100');
-      }
-
-      overlay.classList.remove('hidden');
-    }
-
-    function hideLoading() {
-      document.getElementById('loading-overlay').classList.add('hidden');
-    }
-  </script>
-
-  <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+  <script src="{{ url_for('static', path='dashboard.js') }}?v={{ static_version }}"></script>
 </body>
 </html>

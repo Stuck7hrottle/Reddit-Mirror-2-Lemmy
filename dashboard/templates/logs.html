@@ -1,63 +1,23 @@
 {% extends "base.html" %}
+{% block title %}Logs | Mirror dashboard{% endblock %}
 {% block content %}
 
-<div class="max-w-5xl mx-auto bg-gray-800 p-6 rounded-lg shadow text-gray-100">
-  <div class="flex justify-between items-center mb-4">
-    <h2 class="text-2xl font-semibold">🪵 Live Log Stream</h2>
-    <div class="flex gap-2">
-      <button id="pauseBtn"
-              class="bg-yellow-600 hover:bg-yellow-500 text-white py-1 px-3 rounded text-sm">
-        ⏸️ Pause
-      </button>
-      <a href="/dashboard/" class="bg-blue-600 hover:bg-blue-500 text-white py-1 px-3 rounded text-sm">← Back</a>
-    </div>
+<div class="log-tools">
+  <label class="visually-hidden" for="log-search">Filter log lines</label>
+  <input type="search" id="log-search" placeholder="Filter lines, e.g. a username or subreddit" autocomplete="off">
+  <div class="segmented" role="group" aria-label="Show">
+    <button type="button" data-filter="all" aria-pressed="true">Everything</button>
+    <button type="button" data-filter="activity" aria-pressed="false">Mirrored</button>
+    <button type="button" data-filter="problems" aria-pressed="false">Problems</button>
   </div>
-
-  <pre id="log-content"
-       class="bg-gray-900 p-3 rounded overflow-y-scroll h-[500px] text-sm leading-tight text-gray-300 font-mono"></pre>
+  <span id="live" class="live" role="status">Connecting…</span>
 </div>
 
-<script>
-let autoScroll = true;
-const logEl = document.getElementById("log-content");
-const pauseBtn = document.getElementById("pauseBtn");
-
-function connectWebSocket() {
-  const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${wsProtocol}://${location.host}/dashboard/ws/logs`);
-
-  socket.addEventListener("open", () => {
-    console.log("✅ Connected to log stream");
-  });
-
-  socket.addEventListener("message", (event) => {
-    logEl.textContent += event.data;
-    if (autoScroll) logEl.scrollTop = logEl.scrollHeight;
-  });
-
-  socket.addEventListener("close", () => {
-    console.warn("⚠️ WebSocket closed, retrying in 3s...");
-    setTimeout(connectWebSocket, 3000); // 🔁 Auto-reconnect
-  });
-
-  socket.addEventListener("error", (err) => {
-    console.error("WebSocket error:", err);
-    socket.close();
-  });
-}
-
-pauseBtn.addEventListener("click", () => {
-  autoScroll = !autoScroll;
-  if (autoScroll) {
-    pauseBtn.textContent = "⏸️ Pause";
-    pauseBtn.classList.replace("bg-green-600", "bg-yellow-600");
-  } else {
-    pauseBtn.textContent = "▶️ Resume";
-    pauseBtn.classList.replace("bg-yellow-600", "bg-green-600");
-  }
-});
-
-connectWebSocket();
-</script>
-
+<div class="log-frame">
+  <div id="log" class="log" role="log" aria-live="off" tabindex="0">
+    <p class="empty">Loading the latest log lines…</p>
+  </div>
+  <button type="button" id="jump" class="btn primary jump" hidden>Jump to latest</button>
+</div>
+<p class="sheet-note">Showing the newest 3,000 lines of bridge.log. Scroll up to pause following.</p>
 {% endblock %}
