@@ -203,6 +203,43 @@ cp /tmp/restore/jobs.db data/jobs.db
 docker compose start reddit-mirror reddit-refresh reddit_comment_sync lemmy_comment_sync
 ```
 
+### 🛠️ Repairing Old Posts
+
+Older versions dropped the link from link posts (news articles etc.), and long
+Reddit videos fell back to a link. `repair_posts.py` fixes just those posts:
+it checks each against the original on Reddit (100 per request) and edits the
+Lemmy post **only** when there's something to add. Genuine title-only posts,
+and videos that still don't fit, are left alone.
+
+**1. List the candidates** from Lemmy's database (read-only). Replace
+`lemmy-postgres-1` with your Postgres container and `mirrorbot` with your bot's username:
+
+```bash
+docker exec -i lemmy-postgres-1 psql -U lemmy -d lemmy -At -F, -c "
+SELECT p.id,
+       CASE WHEN p.body LIKE '%[Video](https://v.redd.it/%' THEN 'video_link' ELSE 'title_only' END
+FROM post p JOIN person u ON u.id = p.creator_id
+WHERE u.name = 'mirrorbot' AND u.local AND NOT p.deleted AND NOT p.removed
+  AND ((p.url IS NULL AND coalesce(p.body,'') = '') OR p.body LIKE '%[Video](https://v.redd.it/%')
+ORDER BY p.id" > data/repair_candidates.csv
+```
+
+**2. See what would change** (edits nothing):
+
+```bash
+docker exec reddit_mirror_worker python3 repair_posts.py --dry-run
+```
+
+**3. Run it** in the background; progress shows on the dashboard's Logs page:
+
+```bash
+docker exec -d reddit_mirror_worker python3 repair_posts.py
+```
+
+Progress is saved in `data/repair_progress.json`, so if it's interrupted, run
+step 3 again and it continues where it stopped. `--limit 20` stops after 20
+edits, handy for a first look.
+
 ### ⚙️ Configuration Reference
 
 | Variable | Description | Default |
