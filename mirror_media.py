@@ -68,9 +68,11 @@ UPLOAD_RETRY_MAX = int(os.getenv("UPLOAD_RETRY_MAX", "4"))
 UPLOAD_RETRY_BASE_SECS = float(os.getenv("UPLOAD_RETRY_BASE_SECS", "2.0"))
 
 MEDIA_FETCH_TIMEOUT_SECS = float(os.getenv("MEDIA_FETCH_TIMEOUT_SECS", "30"))
-MEDIA_UPLOAD_TIMEOUT_SECS = float(os.getenv("MEDIA_UPLOAD_TIMEOUT_SECS", "90"))
+# Long videos: pict-rs transcodes before answering, which can take minutes.
+# Too short and the bridge gives up and re-uploads, transcoding it again.
+MEDIA_UPLOAD_TIMEOUT_SECS = float(os.getenv("MEDIA_UPLOAD_TIMEOUT_SECS", "600"))
 
-YT_DLP_TIMEOUT_SECS = int(os.getenv("YT_DLP_TIMEOUT_SECS", "180"))
+YT_DLP_TIMEOUT_SECS = int(os.getenv("YT_DLP_TIMEOUT_SECS", "600"))
 YT_DLP_ALLOW_AUDIO = os.getenv("YT_DLP_ALLOW_AUDIO", "true").lower() in ("1", "true", "yes", "y")
 
 # If pictrs keeps failing with ffprobe errors for an item, stop re-trying it forever.

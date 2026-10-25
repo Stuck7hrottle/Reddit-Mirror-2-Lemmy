@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 ### Fixed
+- Link posts (news articles and other web pages) arrived on Lemmy with only a title: the link was dropped. The link is now the post's URL, so Lemmy shows its preview
+- YouTube/Rumble/etc. links are now the post's URL instead of a "[Video]" line in the body, so Lemmy shows a thumbnail and player
+- If Lemmy refuses a link, the post is created with the link in the body instead of failing
+- Post and media activity is now written to bridge.log, so it shows on the dashboard's Logs page
+
+### Changed
+- Upload and video-download timeouts default to 600 seconds so long videos aren't re-uploaded while pict-rs transcodes them
+- README documents how media is handled and how to allow longer videos in pict-rs
+
+### Fixed
 - Dashboard showed 0 posts mirrored per hour: the post worker only prints to its console, never to bridge.log. Hourly activity and "last post/comment" now come from the database's created_at timestamps
 - Hour labels and "Updated at" now show in the viewer's own time zone instead of the server's UTC
 
