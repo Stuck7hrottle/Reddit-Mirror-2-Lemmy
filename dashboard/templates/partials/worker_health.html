@@ -76,12 +76,15 @@
 </div>
 
 <script>
+// Required by the server on every control request (blocks cross-site requests)
+var DASHBOARD_HEADERS = { "X-Requested-With": "mirror-dashboard" };
+
 function confirmAction(name, action) {
   openConfirmModal(
     `Are you sure you want to ${action.toUpperCase()} “${name}”?`,
     () => {
       showLoading(`${action.toUpperCase()} in progress…`, action);
-      fetch(`/dashboard/container/${name}/${action}`, { method: 'POST' })
+      fetch(`/dashboard/container/${name}/${action}`, { method: 'POST', headers: DASHBOARD_HEADERS })
         .then(res => res.json())
         .then(data => {
           hideLoading();
@@ -108,7 +111,7 @@ function confirmBuild(name, noCache) {
     () => {
       showLoading(`${label} in progress…`, 'build');
       const url = `/dashboard/container/${name}/build${noCache ? '?no_cache=true' : ''}`;
-      fetch(url, { method: 'POST' })
+      fetch(url, { method: 'POST', headers: DASHBOARD_HEADERS })
         .then(res => res.json())
         .then(data => {
           hideLoading();
@@ -132,7 +135,7 @@ function toggleCommentSync() {
     `Toggle Lemmy→Reddit comment sync?`,
     () => {
       showLoading("Toggling comment sync...", "build");
-      fetch(`/dashboard/container/toggle-comment-sync`, { method: 'POST' })
+      fetch(`/dashboard/container/toggle-comment-sync`, { method: 'POST', headers: DASHBOARD_HEADERS })
         .then(res => res.json())
         .then(data => {
           hideLoading();

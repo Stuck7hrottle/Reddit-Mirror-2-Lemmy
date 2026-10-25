@@ -1,0 +1,27 @@
+# Secrets and per-server settings: never commit these
+.env
+.env.*
+!examples/.env
+*.htpasswd
+
+# Runtime data, caches and tokens
+data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+token*.json
+
+# Logs
+logs/
+*.log
+
+# Local deployment files (copied from examples/ and edited per server)
+/docker-compose.yml
+/docker-compose.override.yml
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/

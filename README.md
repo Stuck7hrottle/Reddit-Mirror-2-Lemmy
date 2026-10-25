@@ -85,9 +85,15 @@ docker compose up -d
 ```
 
 #### 4️⃣ Visit the Dashboard
-```
-http://localhost:8000/dashboard/
-```
+The dashboard only listens on the server itself (`127.0.0.1:8080`) because it can
+start and stop containers. Reach it one of two ways:
+
+- **Through nginx with a login:** see `examples/nginx.conf`, then open
+  `https://your-lemmy-domain/dashboard/`
+- **Through an SSH tunnel:** run `ssh -L 8080:127.0.0.1:8080 you@your-server`,
+  then open `http://localhost:8080/dashboard/`
+
+Never publish port 8080 to the internet.
 
 You’ll see:
 - Live post/comment stats
@@ -123,10 +129,15 @@ Example log:
 | Path | Description |
 |------|--------------|
 | `/dashboard/` | Main overview |
-| `/dashboard/logs` | WebSocket log stream |
+| `/dashboard/logs` | Live log page |
+| `/dashboard/ws/logs` | WebSocket log stream |
 | `/dashboard/health` | Docker container stats |
 | `/dashboard/metrics` | JSON metrics API |
-| `/dashboard/container/{name}/{action}` | Start/stop/restart a worker |
+| `/dashboard/container/{name}/{action}` | Start/stop/restart a mirror worker (POST) |
+| `/dashboard/container/{name}/build` | Rebuild and start a mirror worker (POST) |
+
+Control endpoints only accept the four mirror worker containers and require the
+`X-Requested-With: mirror-dashboard` header, which the dashboard's own buttons send.
 
 ---
 

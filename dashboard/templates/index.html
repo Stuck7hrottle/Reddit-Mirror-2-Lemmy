@@ -44,8 +44,8 @@
 
   <!-- Links -->
   <div class="mt-6 flex justify-between items-center flex-wrap gap-3">
-    <a href="/logs" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded shadow">View Logs</a>
-    <a href="/metrics" class="bg-gray-600 hover:bg-gray-500 text-white py-2 px-4 rounded shadow">JSON Metrics</a>
+    <a href="/dashboard/logs" class="bg-blue-600 hover:bg-blue-500 text-white py-2 px-4 rounded shadow">View Logs</a>
+    <a href="/dashboard/metrics" class="bg-gray-600 hover:bg-gray-500 text-white py-2 px-4 rounded shadow">JSON Metrics</a>
   </div>
 
   <!-- Chart Section -->
@@ -78,7 +78,7 @@ let chart;
 // --- Auto-refresh metrics every 10s ---
 async function refreshStats() {
   try {
-    const res = await fetch('/metrics');
+    const res = await fetch('/dashboard/metrics');
     const data = await res.json();
 
     // Update number values

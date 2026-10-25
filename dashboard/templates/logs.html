@@ -9,7 +9,7 @@
               class="bg-yellow-600 hover:bg-yellow-500 text-white py-1 px-3 rounded text-sm">
         ⏸️ Pause
       </button>
-      <a href="/" class="bg-blue-600 hover:bg-blue-500 text-white py-1 px-3 rounded text-sm">← Back</a>
+      <a href="/dashboard/" class="bg-blue-600 hover:bg-blue-500 text-white py-1 px-3 rounded text-sm">← Back</a>
     </div>
   </div>
 
@@ -24,10 +24,10 @@ const pauseBtn = document.getElementById("pauseBtn");
 
 function connectWebSocket() {
   const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
-  const socket = new WebSocket(`${wsProtocol}://${location.host}/ws/logs`);
+  const socket = new WebSocket(`${wsProtocol}://${location.host}/dashboard/ws/logs`);
 
   socket.addEventListener("open", () => {
-    console.log("✅ Connected to /ws/logs");
+    console.log("✅ Connected to log stream");
   });
 
   socket.addEventListener("message", (event) => {
