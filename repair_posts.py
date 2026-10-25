@@ -18,6 +18,11 @@ Run it inside the worker container so it uses the same settings and folders:
     docker exec reddit_mirror_worker python3 repair_posts.py --dry-run
     docker exec -d reddit_mirror_worker python3 repair_posts.py
 
+Safety: the tool never deletes a post or changes a title. Each post is read
+from Lemmy just before editing and only added to: a missing link, a hosted
+video in place of its fallback link, or text that was never mirrored.
+Reddit's "[deleted]"/"[removed]" placeholders are never copied.
+
 Progress is saved to data/repair_progress.json, so it can be stopped and
 re-run: finished posts are skipped. Each change is written to logs/bridge.log
 and shows on the dashboard's Logs page.
@@ -29,6 +34,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sqlite3
 import sys
 import time
@@ -145,11 +151,60 @@ def forget_cached_media(url: str) -> None:
         mm._save_cache(cache)
 
 
+# What Reddit shows in place of text that was deleted or removed after mirroring.
+# It must never be copied into a Lemmy post.
+TEXT_PLACEHOLDERS = {"[deleted]", "[removed]", "[removed by reddit]", "[ removed by reddit ]"}
+VIDEO_FALLBACK = re.compile(r"\[Video\]\((https?://v\.redd\.it/[^)\s]+)\)")
+
+
+def without_placeholders(sub: dict) -> dict:
+    """The Reddit post with '[deleted]'/'[removed]' text treated as no text."""
+    text = (sub.get("selftext") or "").strip()
+    if text.lower() in TEXT_PLACEHOLDERS:
+        sub = dict(sub, selftext="")
+    return sub
+
+
+def get_lemmy_post(post_id: int, jwt: str) -> dict | None:
+    """The post as it is on Lemmy right now: name, body and url."""
+    headers = {"Authorization": f"Bearer {jwt}"}
+    for _ in range(4):
+        r = requests.get(f"{am.LEMMY_URL}/api/v3/post", params={"id": post_id}, headers=headers, timeout=30)
+        if r.ok:
+            post = (r.json().get("post_view") or {}).get("post") or {}
+            return {"name": post.get("name") or "", "body": post.get("body") or "", "url": post.get("url")}
+        if r.status_code == 400 and "rate_limit" in (r.text or ""):
+            time.sleep(30)
+            continue
+        if r.status_code in (500, 502, 503, 504):
+            time.sleep(10)
+            continue
+        return None
+    return None
+
+
+def swap_video_fallback(body: str, has_url: bool, video_src: str, hosted: str) -> tuple[str, str | None]:
+    """
+    Replace the '[Video](https://v.redd.it/...)' fallback with the hosted video,
+    keeping everything else in the Lemmy post exactly as it is.
+    Returns (new_body, new_url): the video becomes the post's link when the post
+    has none, otherwise the line points at the hosted copy instead.
+    """
+    line = f"[Video]({video_src})"
+    if not has_url:
+        new_body = body.replace(line, "")
+        new_body = re.sub(r"\n{3,}", "\n\n", new_body).strip()
+        new_body = re.sub(r"(\n\s*---\s*)+$", "", new_body).strip()  # separator left with nothing after it
+        return new_body, hosted
+    return body.replace(line, f"[Video]({hosted})"), None
+
+
 def plan(kind: str, sub: dict) -> str | None:
     """
     What a dry run would do, without downloading or uploading anything.
     Returns a short description, or None if there's nothing to gain.
     """
+    sub = without_placeholders(sub)
     url = (sub.get("url") or "").replace("&amp;", "&")
     if kind == "video_link":
         return "retry the video under the new length limit"
@@ -162,8 +217,11 @@ def plan(kind: str, sub: dict) -> str | None:
     return None
 
 
-def edit_post(post_id: int, title: str, body: str, url: str | None, jwt: str) -> tuple[bool, str]:
-    payload = {"post_id": post_id, "name": title, "body": body}
+def edit_post(post_id: int, title: str, body: str | None, url: str | None, jwt: str) -> tuple[bool, str]:
+    """body=None leaves the post's text untouched; a string (even empty) replaces it."""
+    payload = {"post_id": post_id, "name": title}
+    if body is not None:
+        payload["body"] = body
     if url:
         payload["url"] = url
     headers = {"Authorization": f"Bearer {jwt}"}
@@ -188,6 +246,45 @@ def edit_post(post_id: int, title: str, body: str, url: str | None, jwt: str) ->
             continue
         return False, f"Lemmy answered {r.status_code}: {text[:120]}"
     return False, "gave up after repeated rate limits/errors"
+
+
+def repair_one(post_id: int, kind: str, sub: dict, action: str, jwt: str) -> str:
+    """
+    Fix one post. Starts from the post as it is on Lemmy now, so nothing that's
+    there is lost: the title is never changed, and text is never replaced.
+    """
+    current = get_lemmy_post(post_id, jwt)
+    if current is None:
+        return "failed: couldn't read the post from Lemmy"
+
+    if kind == "video_link":
+        sources = VIDEO_FALLBACK.findall(current["body"])
+        if not sources:
+            return "left alone: the post has changed since the list was made"
+        body, url, stored = current["body"], current["url"], 0
+        for src in dict.fromkeys(sources):
+            forget_cached_media(src)
+            hosted = mm.mirror_url(src)
+            if hosted and not hosted.startswith("[") and "/pictrs/" in hosted:
+                body, new_url = swap_video_fallback(body, bool(url), src, hosted)
+                url = url or new_url
+                stored += 1
+        if not stored:
+            return "left alone: video still couldn't be stored (too long or download failed)"
+        new_url = url if url != current["url"] else None
+        ok, detail = edit_post(post_id, current["name"], body, new_url, jwt)
+        return f"fixed: {action}" if ok else f"failed: {detail}"
+
+    # title_only: Lemmy has no link and no text, so anything recovered is new
+    if current["body"].strip() or current["url"]:
+        return "left alone: the post has changed since the list was made"
+    if is_reddit_media(sub.get("url", "")):
+        forget_cached_media((sub.get("url") or "").replace("&amp;", "&"))
+    body, url = am.build_media_block_from_submission(sub)
+    if not (body or "").strip() and not url:
+        return "left alone: nothing could be recovered"
+    ok, detail = edit_post(post_id, current["name"], body if (body or "").strip() else None, url, jwt)
+    return f"fixed: {action}" if ok else f"failed: {detail}"
 
 
 # ─────────────────────────────────────────────
@@ -245,21 +342,10 @@ def main() -> int:
                 elif args.dry_run:
                     outcome = f"would {action}"
                 else:
-                    if kind == "video_link" or is_reddit_media(sub.get("url", "")):
-                        forget_cached_media((sub.get("url") or "").replace("&amp;", "&"))
-                    body, url = am.build_media_block_from_submission(sub)
-                    still_link = "[Video](https://v.redd.it/" in (body or "")
-                    if not body and not url:
-                        outcome = "left alone: nothing could be recovered"
-                    elif kind == "video_link" and still_link and not url:
-                        outcome = "left alone: video still couldn't be stored (too long or download failed)"
-                    else:
-                        title = am._sanitize_title(sub.get("title") or "", sub.get("subreddit") or "mirror")
-                        ok, detail = edit_post(int(lid), title, body or "", url, jwt)
-                        outcome = f"fixed: {action}" if ok else f"failed: {detail}"
-                        if ok:
-                            edits += 1
-                            time.sleep(args.delay)
+                    outcome = repair_one(int(lid), kind, without_placeholders(sub), action, jwt)
+                    if outcome.startswith("fixed"):
+                        edits += 1
+                        time.sleep(args.delay)
 
             tally("would change" if outcome.startswith("would") else
                   outcome if outcome.startswith("skipped") else outcome.split(":")[0])
