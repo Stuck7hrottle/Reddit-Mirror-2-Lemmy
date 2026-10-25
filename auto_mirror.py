@@ -87,6 +87,25 @@ def log(msg: str):
     # Console-friendly timestamp + flush
     from datetime import timezone
     print(f"{datetime.now(timezone.utc).isoformat()} | {msg}", flush=True)
+    _append_bridge_log(msg)
+
+
+def _append_bridge_log(msg: str) -> None:
+    """
+    Also write to logs/bridge.log in the same format as utils.log(), so post
+    and media activity shows on the dashboard's Logs page next to comments.
+    Never lets a logging problem interrupt mirroring.
+    """
+    try:
+        try:
+            from utils import LOG_FILE as bridge_log  # same file the comment workers use
+        except Exception:
+            bridge_log = Path("logs") / "bridge.log"
+        line = f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | {msg}\n"
+        with open(bridge_log, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        pass
 
 # ─────────────────────────────────────────────
 # LEGACY POST MAP (for one-time migration)
