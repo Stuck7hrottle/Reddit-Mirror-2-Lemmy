@@ -301,21 +301,32 @@ def download_v_redd_it(url: str) -> Optional[str]:
         return None
     video_id = m.group(1)
     out = DATA_DIR / f"temp_hls_{video_id}_{os.getpid()}_{int(time.time() * 1000)}.mp4"
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
-        "-user_agent", VIDEO_USER_AGENT,
-        "-headers", "Referer: https://www.reddit.com/\r\n",
-        "-i", f"{V_REDDIT_BASE}/{video_id}/HLSPlaylist.m3u8",
-        "-c", "copy",
-        "-bsf:a", "aac_adtstoasc",
-        "-movflags", "+faststart",
-    ]
-    if not YT_DLP_ALLOW_AUDIO:
-        cmd.append("-an")
-    cmd.append(str(out))
+    # Reddit's audio segments are named .aac but contain MPEG-TS. ffmpeg 7.1+
+    # rejects that mismatch unless told not to be picky; older ffmpeg doesn't
+    # know the option, so it's dropped and the command retried.
+    picky_off = ["-extension_picky", "0"]
+
+    def build(extra_input_opts: list[str]) -> list[str]:
+        cmd = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            "-user_agent", VIDEO_USER_AGENT,
+            "-headers", "Referer: https://www.reddit.com/\r\n",
+            "-allowed_extensions", "ALL",
+            *extra_input_opts,
+            "-i", f"{V_REDDIT_BASE}/{video_id}/HLSPlaylist.m3u8",
+            "-c", "copy",
+            "-bsf:a", "aac_adtstoasc",
+            "-movflags", "+faststart",
+        ]
+        if not YT_DLP_ALLOW_AUDIO:
+            cmd.append("-an")
+        cmd.append(str(out))
+        return cmd
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=YT_DLP_TIMEOUT_SECS)
+        result = subprocess.run(build(picky_off), capture_output=True, text=True, timeout=YT_DLP_TIMEOUT_SECS)
+        if result.returncode != 0 and "extension_picky" in (result.stderr or ""):
+            result = subprocess.run(build([]), capture_output=True, text=True, timeout=YT_DLP_TIMEOUT_SECS)
         if result.returncode != 0 or not out.exists() or out.stat().st_size == 0:
             log(f"⚠️ Direct v.redd.it download failed for {url}: {result.stderr.strip()[:200]}")
             out.unlink(missing_ok=True)
