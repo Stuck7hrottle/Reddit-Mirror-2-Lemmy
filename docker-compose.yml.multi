@@ -59,13 +59,12 @@ services:
       context: ./dashboard
     container_name: mirror-dashboard
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"   # localhost only: reach it via nginx or an SSH tunnel
     environment:
       - DATA_DIR=/opt/Reddit-Mirror-2-Lemmy/data
     volumes:
       - ./data:/opt/Reddit-Mirror-2-Lemmy/data
       - ./dashboard/static:/app/static
-    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
     networks:
       - fosscadguncaddesignscom_default
 

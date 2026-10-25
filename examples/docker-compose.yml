@@ -45,16 +45,25 @@ services:
     build:
       context: ./dashboard
     container_name: mirror-dashboard
-    # Bind only to localhost if you plan to reverse-proxy through Cloudflare or Nginx
+    # Keep this bound to 127.0.0.1. The dashboard can start and stop
+    # containers, so it must only be reached through nginx (with its login)
+    # or an SSH tunnel, never directly from the internet.
     ports:
       - "127.0.0.1:8080:8080"
     environment:
       - DATA_DIR=/opt/Reddit-Mirror-2-Lemmy/data
+      - ENV_PATH=/opt/Reddit-Mirror-2-Lemmy/.env
     volumes:
       - ./data:/opt/Reddit-Mirror-2-Lemmy/data
       - ./dashboard/static:/app/static
-    # Use --reload only in development; remove in production for stability
-    command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload
+      - ./logs:/opt/Reddit-Mirror-2-Lemmy/logs
+      # Needed for the Worker Health panel and its start/stop/build buttons.
+      # The dashboard only acts on the four mirror workers (see MANAGED_CONTAINERS).
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Needed for Build and Toggle Sync, which run `docker compose` on this project
+      - ./:/opt/Reddit-Mirror-2-Lemmy
+    # Runs without --reload (see dashboard/Dockerfile). Only add
+    # `command: uvicorn main:app --host 0.0.0.0 --port 8080 --reload` while developing.
     restart: unless-stopped
         # Uncomment below if you want to connect to your Lemmy-Ansible Docker network
     #networks:
