@@ -1,0 +1,8 @@
+# Nightly backup of the mirror's database and settings.
+# Install: sudo cp contrib/cron.d-reddit-mirror /etc/cron.d/reddit-mirror
+# Times are the server's clock (UTC on most VPSes): 09:17 UTC is 4:17 AM US Central,
+# the mirror's quietest hour. Output goes to logs/backup.log.
+SHELL=/bin/sh
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+17 9 * * * root /opt/Reddit-Mirror-2-Lemmy/contrib/backup.sh >> /opt/Reddit-Mirror-2-Lemmy/logs/backup.log 2>&1

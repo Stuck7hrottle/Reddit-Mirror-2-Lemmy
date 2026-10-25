@@ -45,3 +45,6 @@ post_map.json
 .idea/
 .DS_Store
 docker-restart.sh
+
+# Local backups (contain .env)
+backups/

@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+- `contrib/backup.sh`: nightly consistent backup of jobs.db, media cache and .env, kept 14 days
+- `contrib/logrotate.conf` and `contrib/cron.d-reddit-mirror` to install log rotation and the backup schedule
+- README section on installing backups and restoring one
+
 ### Fixed
 - Link posts (news articles and other web pages) arrived on Lemmy with only a title: the link was dropped. The link is now the post's URL, so Lemmy shows its preview
 - YouTube/Rumble/etc. links are now the post's URL instead of a "[Video]" line in the body, so Lemmy shows a thumbnail and player
