@@ -44,7 +44,11 @@ MANAGED_CONTAINERS = {
     "reddit_mirror_refresh": "reddit-refresh",
     "reddit_comment_sync": "reddit_comment_sync",
     "lemmy_comment_sync": "lemmy_comment_sync",
+    "odysee_mirror": "odysee-mirror",
 }
+# Workers that not every install runs: left out of the list (and not counted
+# as stopped) when their container doesn't exist, instead of showing "Not set up".
+OPTIONAL_CONTAINERS = {"odysee_mirror"}
 CONTAINER_ACTIONS = {"start", "stop", "restart"}
 
 # Plain-language names for the worker list
@@ -53,6 +57,7 @@ WORKER_INFO = {
     "reddit_mirror_refresh": ("Reddit check", "Looks for new and edited posts on each subreddit"),
     "reddit_comment_sync": ("Reddit → Lemmy comments", "Copies new Reddit comments onto mirrored posts"),
     "lemmy_comment_sync": ("Lemmy → Reddit comments", "Copies Lemmy replies back to Reddit"),
+    "odysee_mirror": ("Odysee channels", "Posts new uploads from your Odysee channels to their communities"),
 }
 
 # ─────────────────────────────────────────────
@@ -62,7 +67,7 @@ app = FastAPI(title="Reddit–Lemmy Mirror Dashboard")
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # Bump when CSS/JS/fonts change: nginx tells browsers to cache /dashboard/static for 7 days
-templates.env.globals["static_version"] = "3"
+templates.env.globals["static_version"] = "4"
 templates.env.filters["thousands"] = lambda n: f"{n:,}" if isinstance(n, int) else n
 # ✅ Mount static assets at /dashboard/static
 app.mount("/dashboard/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
@@ -218,7 +223,7 @@ def read_tail_lines(path: Path, max_bytes: int = LOG_SCAN_BYTES) -> list[str]:
 
 
 def classify(message: str):
-    if message.startswith("✅ Posted"):
+    if message.startswith(("✅ Posted", "📺 Odysee: ✅ Posted")):
         return "post"
     if message.startswith("💬 Mirrored"):
         return "comment"
@@ -279,7 +284,7 @@ def db_stats():
     out = {
         "available": False, "posts": 0, "comments": 0,
         "queued_posts": 0, "queued_comments": 0, "queued_other": 0,
-        "running": 0, "failed": 0, "jobs_done": 0,
+        "running": 0, "failed": 0, "jobs_done": 0, "other_posts": 0,
     }
     if not db_path.exists():
         return out
@@ -292,6 +297,8 @@ def db_stats():
         tables = {r[0] for r in cur.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "posts" in tables:
             out["posts"] = cur.execute("SELECT COUNT(*) FROM posts").fetchone()[0]
+        if "source_posts" in tables:  # other sources (Odysee) keep their own records
+            out["other_posts"] = cur.execute("SELECT COUNT(*) FROM source_posts WHERE status='posted'").fetchone()[0]
         if "comments" in tables:
             out["comments"] = cur.execute("SELECT COUNT(*) FROM comments").fetchone()[0]
         if "jobs" in tables:
@@ -363,6 +370,26 @@ def db_activity(now_utc: datetime):
                 last[table] = datetime.strptime(str(latest)[:19], "%Y-%m-%d %H:%M:%S") if latest else None
             except ValueError:
                 last[table] = None
+        # Posts from other sources (Odysee) count as posts too
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "source_posts" in tables:
+            for (value,) in conn.execute(
+                "SELECT created_at FROM source_posts WHERE status='posted' AND created_at >= ?", (cutoff,)
+            ):
+                try:
+                    ts = datetime.strptime(str(value)[:19], "%Y-%m-%d %H:%M:%S")
+                except ValueError:
+                    continue
+                slot = int((ts - window_start).total_seconds() // 3600)
+                if 0 <= slot < 24:
+                    series["posts"][slot] += 1
+            latest = conn.execute("SELECT MAX(created_at) FROM source_posts WHERE status='posted'").fetchone()[0]
+            try:
+                other = datetime.strptime(str(latest)[:19], "%Y-%m-%d %H:%M:%S") if latest else None
+            except ValueError:
+                other = None
+            if other and (not last.get("posts") or other > last["posts"]):
+                last["posts"] = other
     except sqlite3.Error:
         return None
     finally:
@@ -385,7 +412,8 @@ def worker_states():
             c = client.containers.get(name)
             states[name] = (c.status, parse_docker_time(c.attrs["State"].get("StartedAt")))
         except docker.errors.NotFound:
-            states[name] = ("not found", None)
+            if name not in OPTIONAL_CONTAINERS:
+                states[name] = ("not found", None)
         except Exception:
             states[name] = ("unknown", None)
     return states
@@ -443,7 +471,8 @@ def get_overview():
         "level": level,
         "headline": headline,
         "detail": " ".join(parts),
-        "totals": {"posts": db["posts"], "comments": db["comments"]},
+        "totals": {"posts": db["posts"] + db["other_posts"], "comments": db["comments"],
+                   "other_posts": db["other_posts"]},
         "last24": {"posts": sum(activity["posts"]), "comments": sum(activity["comments"])},
         "queue": {
             "posts": db["queued_posts"], "comments": db["queued_comments"],
@@ -564,6 +593,7 @@ def get_worker_health_html(request: Request):
     sync_enabled = comment_sync_enabled()
     # Docker takes about a second per container to sample CPU, so ask in parallel
     workers = list(_stats_pool.map(lambda n: worker_details(n, sync_enabled), MANAGED_CONTAINERS))
+    workers = [w for w in workers if not (w["name"] in OPTIONAL_CONTAINERS and w["state"] == "missing")]
     return templates.TemplateResponse(request, "partials/worker_health.html", {"containers": workers})
 
 # NOTE: the build route must be registered before the generic {action} route,

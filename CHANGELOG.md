@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+- Dashboard shows the Odysee mirror as a worker (with restart/stop/rebuild) when its container exists, and leaves it out otherwise. Odysee posts count in the activity strip, totals ("including N from Odysee") and last-post time; its "Posted" lines are filed under Mirrored on the Logs page
+
 ### Added
 - `odysee_mirror.py`: mirrors Odysee channels into Lemmy communities as link posts (title, Odysee link and thumbnail, description, credit line). Reads Odysee's API, so a channel's whole history can be backfilled oldest first; then checks for new uploads. Dry-run and `--limit` modes; its own records, separate from Reddit's
 - `core/models.py` (shared post/comment format, from the multi-source-bridge branch) and `sources/odysee.py`, the first non-Reddit source
