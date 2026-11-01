@@ -1,6 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+
+## [3.0.0] - 2026-11-01
+
+### Upgrading from 2.x
+- **Dashboard port:** the example compose file now binds the dashboard to `127.0.0.1:8080` only. If you reached it directly on the server's public IP, put it behind nginx (see `examples/nginx.conf`) or use an SSH tunnel
+- **Dashboard login:** the example nginx config now requires HTTP basic auth and belongs in your HTTPS server block. Create the password file first: `sudo htpasswd -c /etc/nginx/.dashboard_htpasswd yourusername`
+- **New optional service:** add the `odysee-mirror` service from `examples/docker-compose.yml` if you want Odysee mirroring; it stays idle until `ODYSEE_MAP` is set
+- **Backups and log rotation** are opt-in: see "Backups and Logs" in the README to install `contrib/backup.sh`, `contrib/logrotate.conf` and `contrib/cron.d-reddit-mirror`
+- Rebuild the containers after pulling (`docker compose up -d --build`) so the Reddit video download fix and new ffmpeg flags take effect
+
 ### Changed
 - README brought up to date: Odysee in the overview, architecture, features, `.env` setup and configuration table; correct refresh interval (hourly); database/log layout; today's media settings; dashboard and tool run commands
 - odysee_mirror.py idles instead of exiting when `ODYSEE_MAP` isn't set, so the example compose service can't restart-loop
