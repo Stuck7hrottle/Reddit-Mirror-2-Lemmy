@@ -1,13 +1,17 @@
 # Project Roadmap
 
-## ✅ Current Release (v2.4)
+## ✅ Current Release (v3.0.0)
 
-- Two-way post & comment mirroring  
-- Dashboard with live Docker container controls  
-- Persistent queue with SQLite jobs database  
-- Media caching and `/pictrs` rehosting  
-- Auto-reconnect WebSocket log viewer  
-- `.env` reloadable without restart  
+- Two-way post & comment mirroring between Reddit and Lemmy
+- Odysee channel → Lemmy community mirroring, with full-history backfill
+- Reddit videos downloaded directly from Reddit's video CDN (v.redd.it), with yt-dlp as a fallback
+- Link posts keep their URL so Lemmy shows previews, thumbnails and players
+- `repair_posts.py` to fix older posts that lost their link or video
+- Nightly backups and log rotation (`contrib/`)
+- Redesigned dashboard: plain status, 24-hour activity, accurate totals, worker controls, filterable logs
+- Hardened dashboard: localhost-only by default, login via nginx, CSRF protection, control limited to the mirror workers
+- Persistent queue with SQLite jobs database
+- Media caching and `/pictrs` rehosting
 
 ---
 
@@ -20,6 +24,7 @@
 | v2.2 | Lemmy → Reddit mirroring (two-way) |
 | v2.3 | Dashboard metrics, charts, and live logs |
 | v2.4 | Docker health stats, rebuild actions |
+| v3.0 | Odysee source, Reddit video fix, repair tool, backups, dashboard redesign and hardening |
 
 ---
 
@@ -43,6 +48,7 @@
 | **Federation** | Cross-instance post synchronization |
 | **Scaling** | Multi-instance load balancing |
 | **Security** | Token rotation and audit logging |
+| **Sources** | More non-Reddit sources using the shared `core/models.py` format |
 
 ---
 
@@ -56,4 +62,4 @@
 ---
 
 ## 🧾 Changelog Summary
-See commit history for detailed updates and schema migrations.
+See [CHANGELOG.md](CHANGELOG.md) for detailed changes in each release.
