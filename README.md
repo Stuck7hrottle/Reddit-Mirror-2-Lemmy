@@ -66,8 +66,8 @@ worker is logged to `logs/bridge.log`, errors to `logs/errors.log`.
 
 #### 1️⃣ Clone and prepare
 ```bash
-git clone https://github.com/yourname/reddit-lemmy-mirror.git
-cd reddit-lemmy-mirror
+git clone https://github.com/Stuck7hrottle/Reddit-Mirror-2-Lemmy.git
+cd Reddit-Mirror-2-Lemmy
 cp examples/.env .env
 cp examples/docker-compose.yml docker-compose.yml
 ```
