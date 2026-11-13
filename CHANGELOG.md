@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+- Reddit comment sync no longer blacklists every post when Reddit refuses the whole server (an IP block such as "blocked by network security", a suspended account, or bad credentials). Each cycle first checks that Reddit answers for the bot account; if it doesn't, it logs one line saying why and skips the cycle. A 403 on a single post re-checks Reddit before that post is ignored
+- The "Reddit is not reachable" line shows under Problems on the dashboard's Logs page
+- The comment sync log no longer prints one "Permanently ignoring previously skipped post" line per ignored post every cycle; it prints a count instead, and warns when every active post is ignored
+
+### Added
+- `python3 reddit_comment_sync.py --unignore-since 'YYYY-MM-DD HH:MM'` (UTC) clears posts ignored at or after that time, e.g. after a Reddit block, so their comments are retried
+
 ## [3.0.0] - 2026-11-01
 
 ### Upgrading from 2.x

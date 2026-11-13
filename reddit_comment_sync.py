@@ -7,8 +7,10 @@ Reddit → Lemmy Comment Mirror (Selective, Safe Two-Way, Media Complete)
 """
 
 import os
+import sys
 import time
 import praw
+import prawcore
 import requests
 
 from db_cache import DB
@@ -80,9 +82,47 @@ def format_reddit_comment_body(comment):
 
     return "\n".join([p for p in parts if p]).strip()
 
+def _describe_reddit_error(e) -> str:
+    """Short, human-readable reason for a Reddit API failure."""
+    resp = getattr(e, "response", None)
+    status = getattr(resp, "status_code", None)
+    text = (getattr(resp, "text", "") or "").lower()
+    if "blocked by network security" in text:
+        return ("403 'blocked by network security' — Reddit is blocking this server's IP. "
+                "File a ticket from the block page, or route Reddit traffic through another IP (HTTPS_PROXY)")
+    if status == 403:
+        return "403 Forbidden — the bot account may be suspended, or the API app revoked"
+    if status == 401:
+        return "401 Unauthorized — check REDDIT_CLIENT_ID / SECRET / USERNAME / PASSWORD (2FA is not supported)"
+    if status:
+        return f"HTTP {status}"
+    return f"{type(e).__name__}: {e}"
+
+
+def reddit_is_reachable(reddit) -> bool:
+    """
+    Check that Reddit answers for this account at all before touching any posts.
+    When it doesn't (IP block, suspension, outage, bad credentials), every post
+    would fail the same way, and none of those failures are about the post.
+    """
+    try:
+        if os.getenv("REDDIT_USERNAME"):
+            reddit.user.me()
+        else:
+            next(iter(reddit.subreddit("all").new(limit=1)), None)
+        return True
+    except (prawcore.exceptions.PrawcoreException, praw.exceptions.PRAWException) as e:
+        log(f"⛔ Reddit is not reachable — {_describe_reddit_error(e)}. "
+            f"Skipping this cycle; no posts were marked ignored.")
+        return False
+
+
 def mirror_new_reddit_replies(force_backfill=False):
     db = DB()
     reddit = create_reddit_client()
+
+    if not reddit_is_reachable(reddit):
+        return
 
     # 🛠️ Configuration: Pull window from env, default to 30 days
     sync_days = int(os.getenv("SYNC_WINDOW_DAYS", "30"))
@@ -100,13 +140,16 @@ def mirror_new_reddit_replies(force_backfill=False):
     # Use DB-based ignore comments tracking
     ignored_comments = set(db.get_ignored_comments())
     
-    log(f"🔄 Syncing comments for {len(active_posts)} active posts (Window: {sync_days} days)")
+    skipped = [p for p, _ in active_posts if p in ignored_posts]
+    to_sync = [(p, l) for p, l in active_posts if p not in ignored_posts]
 
-    for reddit_post_id, lemmy_post_id in active_posts:
-        # 🔒 Skip permanently ignored posts
-        if reddit_post_id in ignored_posts:
-            log(f"🚫 Permanently ignoring previously skipped post {reddit_post_id}")
-            continue
+    log(f"🔄 Syncing comments for {len(to_sync)} active posts (Window: {sync_days} days"
+        + (f"; {len(skipped)} ignored posts skipped" if skipped else "") + ")")
+    if active_posts and not to_sync:
+        log("⚠️ Every active post is on the ignore list — if Reddit was blocked or down earlier, "
+            "clear it with: python3 reddit_comment_sync.py --unignore-since 'YYYY-MM-DD HH:MM'")
+
+    for reddit_post_id, lemmy_post_id in to_sync:
 
         # 💡 Fetch a fresh JWT at the start of every batch
         jwt = get_valid_token(
@@ -120,16 +163,22 @@ def mirror_new_reddit_replies(force_backfill=False):
             try:
                 submission.comments.replace_more(limit=None)
                 comments = submission.comments.list()
+            except prawcore.exceptions.TooManyRequests:
+                log("⚠️ Rate limited by Reddit (429) — sleeping 2 minutes before retrying.")
+                time.sleep(120)
+                continue
+            except prawcore.exceptions.Forbidden as e:
+                # A 403 here can mean "this post is gone" or "Reddit is refusing
+                # us entirely". Only the first is a reason to ignore the post, so
+                # re-check Reddit itself before blaming the post.
+                if not reddit_is_reachable(reddit):
+                    log("⏸️ Stopping this cycle early; will try again next cycle.")
+                    return
+                log(f"⚠️ Ignoring Reddit post {reddit_post_id} from now on — 403 for this post only "
+                    f"(removed, private, or its subreddit is restricted).")
+                db.mark_post_ignored(reddit_post_id, reason="forbidden")
+                continue
             except Exception as e:
-                # Gracefully handle forbidden/deleted/private posts
-                if "429" in str(e):
-                    log("⚠️ Rate limited by Reddit (429) — sleeping 2 minutes before retrying.")
-                    time.sleep(120)
-                    continue
-                if "403" in str(e) or "forbidden" in str(e).lower():
-                    log(f"⚠️ Skipping Reddit post {reddit_post_id} — access forbidden or removed.")
-                    db.mark_post_ignored(reddit_post_id, reason="forbidden")
-                    continue
                 log_error("reddit_comment_sync.fetch_comments", e)
                 continue
 
@@ -242,7 +291,28 @@ def mirror_new_reddit_replies(force_backfill=False):
             log_error("reddit_comment_sync.post_loop", e)
             continue
 
+def unignore_cli(argv) -> bool:
+    """
+    `python3 reddit_comment_sync.py --unignore-since "2026-11-13 03:00"` clears posts
+    put on the ignore list at or after that UTC time, e.g. after a Reddit block.
+    Returns True if it handled the command line.
+    """
+    if "--unignore-since" not in argv:
+        return False
+    i = argv.index("--unignore-since")
+    if i + 1 >= len(argv):
+        print("usage: reddit_comment_sync.py --unignore-since 'YYYY-MM-DD HH:MM' (UTC)")
+        sys.exit(2)
+    since = argv[i + 1]
+    n = DB().unignore_posts_since(since)
+    print(f"Removed {n} post(s) ignored since {since} UTC. They will be retried next cycle.")
+    return True
+
+
 def main():
+    if unignore_cli(sys.argv[1:]):
+        return
+
     delay = int(os.getenv("REDDIT_COMMENT_SYNC_STARTUP_DELAY", "90"))
     log(f"⏳ Waiting {delay}s before starting Reddit→Lemmy comment sync...")
     time.sleep(delay)
