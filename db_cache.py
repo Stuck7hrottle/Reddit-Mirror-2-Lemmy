@@ -121,6 +121,15 @@ class DB:
             row = conn.execute("SELECT 1 FROM ignored_posts WHERE reddit_id = ?;", (reddit_id,)).fetchone()
             return bool(row)
 
+    def unignore_posts_since(self, since: str) -> int:
+        """Remove posts ignored at or after `since` (UTC, 'YYYY-MM-DD HH:MM[:SS]'). Returns the count."""
+        with self._lock, self._get_conn() as conn, conn:
+            if conn.execute("SELECT datetime(?);", (since,)).fetchone()[0] is None:
+                raise ValueError(f"not a date/time SQLite understands: {since!r}")
+            return conn.execute(
+                "DELETE FROM ignored_posts WHERE created_at >= datetime(?);", (since,)
+            ).rowcount
+
     def get_ignored_posts(self) -> list[str]:
         """Return a list of all permanently ignored Reddit post IDs."""
         with self._lock, self._get_conn() as conn:

@@ -298,6 +298,31 @@ If Reddit is down it pauses and retries, and one failing post never ends the
 run: it's reported and retried next time. `--limit 20` stops after 20
 edits, handy for a first look.
 
+### 🚧 When Reddit Blocks the Server
+
+If the comment sync logs `⛔ Reddit is not reachable — 403 'blocked by network
+security'`, Reddit is refusing your server's IP address (it does this to many
+VPS and datacenter ranges). The sync skips each cycle until it's lifted and
+does not give up on any posts. To confirm from the server:
+
+```bash
+curl -s -A "ip-test/1.0" https://www.reddit.com/r/all/about.json | grep -o "blocked by network security"
+```
+
+To get unblocked, file a ticket from the block page's "file a ticket" link
+(include the server's IP and your app's client ID), or send Reddit traffic
+through another IP by setting `HTTPS_PROXY` on the Reddit containers only.
+Lowering `SYNC_WINDOW_DAYS` and raising `REDDIT_COMMENT_SYNC_INTERVAL` cuts how
+many requests the bot makes.
+
+Older versions marked every post "forbidden" during a block. After upgrading,
+clear posts ignored since the block started (time in UTC) so their comments
+are synced again:
+
+```bash
+docker exec reddit_comment_sync python3 reddit_comment_sync.py --unignore-since "2026-11-13 03:00"
+```
+
 ### ⚙️ Configuration Reference
 
 | Variable | Description | Default |
