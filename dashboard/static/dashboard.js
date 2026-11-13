@@ -229,7 +229,7 @@
   const LINE = /^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d) \| ?(.*)$/;
 
   function kindOf(msg) {
-    if (/^(❌|🚫)|\bERROR\b|Traceback|Exception/.test(msg)) return "bad";
+    if (/^(❌|🚫|⛔)|\bERROR\b|Traceback|Exception/.test(msg)) return "bad";
     if (/^⚠️|\b[Ff]ailed\b|\bretrying\b/.test(msg)) return "warn";
     if (msg.startsWith("✅ Posted") || msg.startsWith("📺 Odysee: ✅ Posted")) return "post";
     if (msg.startsWith("💬 Mirrored")) return "comment";
