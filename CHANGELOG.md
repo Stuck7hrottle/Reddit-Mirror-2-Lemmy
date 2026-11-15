@@ -7,6 +7,10 @@
 - The "Reddit is not reachable" line shows under Problems on the dashboard's Logs page
 - The comment sync log no longer prints one "Permanently ignoring previously skipped post" line per ignored post every cycle; it prints a count instead, and warns when every active post is ignored
 
+### Changed
+- README: a warning under Requirements on avoiding Reddit blocks (dedicated bot accounts, the [App] label, user agent format, request volume, checking the server IP first); `SYNC_WINDOW_DAYS` and the user agent settings added to the configuration table
+- `examples/.env`: user agents in Reddit's `platform:app:version (by /u/name)` format, and lighter comment sync defaults for new installs (`SYNC_WINDOW_DAYS=7`, `REDDIT_COMMENT_SYNC_INTERVAL=1800`). Existing `.env` files and the code defaults are unchanged
+
 ### Added
 - `python3 reddit_comment_sync.py --unignore-since 'YYYY-MM-DD HH:MM'` (UTC) clears posts ignored at or after that time, e.g. after a Reddit block, so their comments are retried
 
