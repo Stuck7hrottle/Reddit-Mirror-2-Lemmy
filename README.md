@@ -60,6 +60,23 @@ worker is logged to `logs/bridge.log`, errors to `logs/errors.log`.
 - 2 Reddit accounts with Reddit API credentials (from [Reddit App Console](https://www.reddit.com/prefs/apps))
   - One for Reddit to Lemmy - Choose script not web app when creating
   - One for Lemmy to Reddit - Choose script not web app when creating
+
+> ⚠️ **Avoiding Reddit blocks.** Reddit restricts accounts and IP addresses that
+> look like unlabeled bots, and it blocks many VPS/datacenter IPs outright
+> ("You've been blocked by network security"). While blocked, nothing on the
+> server can reach Reddit, OAuth included. To lower the risk:
+> - **Use accounts made for the bot, not your personal account.** Reddit may ask
+>   an account that behaves like a bot to verify it's human; a personal account
+>   that also runs the bot can get restricted.
+> - **Apply for Reddit's [App] label** for the bot accounts (see r/redditdev).
+> - **Set a descriptive user agent** in Reddit's format, e.g.
+>   `REDDIT_USER_AGENT=linux:MyMirrorBot:1.0 (by /u/your_username)`.
+> - **Keep the request volume modest.** Comment sync re-checks every post from
+>   the last `SYNC_WINDOW_DAYS` days every `REDDIT_COMMENT_SYNC_INTERVAL` seconds;
+>   the example `.env` uses 7 days and 30 minutes.
+> - **Check your server isn't already blocked** before setting up:
+>   `curl -s -o /dev/null -w "%{http_code}\n" -A "ip-test/1.0" https://www.reddit.com/r/all/about.json`
+>   (200 is fine, 403 is blocked). See [When Reddit Blocks the Server](#-when-reddit-blocks-the-server).
 ---
 
 ### 📦 Installation
@@ -331,6 +348,9 @@ docker exec reddit_comment_sync python3 reddit_comment_sync.py --unignore-since 
 | `SUB_MAP` | `reddit_sub:lemmy_comm` mappings | example values |
 | `ENABLE_LEMMY_COMMENT_SYNC` | Mirror Lemmy → Reddit comments | false |
 | `REDDIT_COMMENT_SYNC_INTERVAL` | Reddit → Lemmy interval (sec) | 600 |
+| `SYNC_WINDOW_DAYS` | How many days back comment sync re-checks posts for new comments | 30 |
+| `REDDIT_USER_AGENT` | User agent for Reddit → Lemmy; use `platform:app:version (by /u/name)` | varies by script |
+| `LEMMY_TO_REDDIT_USER_AGENT` | User agent for Lemmy → Reddit | `LemmySyncBot/1.0` |
 | `LEMMY_COMMENT_SYNC_INTERVAL` | Lemmy → Reddit interval (sec) | 600 |
 | `DATA_DIR` | Data directory | `/opt/Reddit-Mirror-2-Lemmy/data` |
 | `MIRROR_COMMENTS` | Enable comment mirroring | true |
