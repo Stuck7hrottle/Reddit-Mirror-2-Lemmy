@@ -104,7 +104,7 @@ def _get_session() -> requests.Session:
     global _session
     if _session is None:
         s = requests.Session()
-        s.headers.update({"User-Agent": "reddit-lemmy-bridge/1.0"})
+        s.headers.update({"User-Agent": os.getenv("REDDIT_USER_AGENT", "reddit-lemmy-bridge/1.0")})
         _session = s
     return _session
 
