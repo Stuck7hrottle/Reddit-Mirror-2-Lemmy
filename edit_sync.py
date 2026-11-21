@@ -36,11 +36,47 @@ def get_lemmy_token():
     log("✅ Logged into Lemmy (new token cached)")
     return jwt
 
+REDDIT_USER_AGENT = os.getenv("REDDIT_USER_AGENT", "reddit-lemmy-bridge")
+_reddit_token = {"value": None, "expires": 0.0}
+
+def get_reddit_token():
+    """App-only OAuth token, cached until shortly before it expires.
+    Unauthenticated www.reddit.com requests are blocked from most VPS IPs."""
+    if _reddit_token["value"] and time.time() < _reddit_token["expires"]:
+        return _reddit_token["value"]
+    client_id = os.getenv("REDDIT_CLIENT_ID")
+    client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+    if not (client_id and client_secret):
+        log("⚠️ REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET not set — cannot use Reddit OAuth")
+        return None
+    r = requests.post("https://www.reddit.com/api/v1/access_token",
+                      auth=requests.auth.HTTPBasicAuth(client_id, client_secret),
+                      data={"grant_type": "client_credentials"},
+                      headers={"User-Agent": REDDIT_USER_AGENT}, timeout=15)
+    if not r.ok:
+        log(f"⚠️ Reddit token request failed ({r.status_code})")
+        return None
+    body = r.json()
+    _reddit_token["value"] = body.get("access_token")
+    _reddit_token["expires"] = time.time() + int(body.get("expires_in", 3600)) - 60
+    return _reddit_token["value"]
+
 def fetch_reddit_post(subreddit, post_id):
-    url = f"https://www.reddit.com/r/{subreddit}/comments/{post_id}.json"
-    headers = {"User-Agent": "reddit-lemmy-bridge"}
+    token = get_reddit_token()
+    if not token:
+        return None
+    url = f"https://oauth.reddit.com/r/{subreddit}/comments/{post_id}.json"
+    headers = {"User-Agent": REDDIT_USER_AGENT, "Authorization": f"bearer {token}"}
     r = requests.get(url, headers=headers, timeout=15)
+    if r.status_code == 401:  # token expired early — refresh once
+        _reddit_token["value"] = None
+        token = get_reddit_token()
+        if not token:
+            return None
+        headers["Authorization"] = f"bearer {token}"
+        r = requests.get(url, headers=headers, timeout=15)
     if r.status_code != 200:
+        log(f"⚠️ Reddit fetch for {post_id} failed ({r.status_code})")
         return None
     data = r.json()[0]["data"]["children"][0]["data"]
     return data

@@ -723,7 +723,7 @@ def migrate_legacy_json_to_sqlite(db: DB):
 def fetch_reddit_submission(submission_id: str):
     client_id = os.getenv("REDDIT_CLIENT_ID")
     client_secret = os.getenv("REDDIT_CLIENT_SECRET")
-    user_agent = "RedditToLemmyBridge/1.1.0 (by u/YourBotName)"
+    user_agent = os.getenv("REDDIT_USER_AGENT", "RedditToLemmyBridge/1.1.0")
 
     base_url = f"https://www.reddit.com/comments/{submission_id}.json"
     headers = {"User-Agent": user_agent}
@@ -1103,7 +1103,7 @@ def mirror_loop(db: JobDB):
     reddit = praw.Reddit(
         client_id=os.getenv("REDDIT_CLIENT_ID"),
         client_secret=os.getenv("REDDIT_CLIENT_SECRET"),
-        user_agent="reddit-lemmy-bridge",
+        user_agent=os.getenv("REDDIT_USER_AGENT", "reddit-lemmy-bridge"),
     )
 
     while True:
